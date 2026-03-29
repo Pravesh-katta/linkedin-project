@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="card">
+    <div class="split-head">
+      <div>
+        <p class="eyebrow">Saved search</p>
+        <h1>{{ search.keywords }}</h1>
+        <p class="lede">
+          State-aware search across all enabled U.S. states. Each state is queried using both abbreviation and full-name variants.
+        </p>
+      </div>
+      <form method="post" action="{{ request.url_for('run_search', search_id=search.id) }}">
+        <button class="button button-primary" type="submit">Run search now</button>
+      </form>
+    </div>
+
+    <div class="meta-grid">
+      <div>
+        <strong>State scope</strong>
+        <span>
+          {% if search.state_scope == 'custom' and enabled_state_names %}
+            {{ enabled_state_names|join(', ') }}
+          {% else %}
+            All states
+          {% endif %}
+        </span>
+      </div>
+      <div><strong>Window</strong><span>{{ search.window_hours }} hours</span></div>
+      <div><strong>Max per state query</strong><span>{{ search.max_results_per_state }}</span></div>
+      <div><strong>Schedule</strong><span>{{ search.schedule_minutes }} minutes</span></div>
+      <div><strong>Last run</strong><span>{{ search.last_run_at or 'Not yet run' }}</span></div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h2>Grouped post results</h2>
+      {% if grouped_results %}
+        <div class="state-groups">
+          {% for state_code, posts in grouped_results.items() %}
+            <section class="state-group">
+              <div class="state-head">
+                <h3>{{ state_names.get(state_code, state_code) }}</h3>
+                <span>{{ posts|length }} posts</span>
+              </div>
+              <div class="stack">
+                {% for post in posts %}
+                  <a class="post-card{% if post.viewed_at %} post-card-viewed{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
+                    <div class="post-card-head">
+                      <strong>{{ post.author_name or 'Unknown author' }}</strong>
+                      <div class="post-card-flags">
+                        {% if post.viewed_at %}
+                          <span class="post-status post-status-viewed">Seen</span>
+                        {% endif %}
+                        <span>score {{ '%.2f'|format(post.score) }}</span>
+                      </div>
+                    </div>
+                    <p class="post-snippet">{{ post.content_text[:260] }}{% if post.content_text|length > 260 %}…{% endif %}</p>
+                    <p class="meta">{{ post.relative_time_text or 'Time unavailable' }}</p>
+                  </a>
+                {% endfor %}
+              </div>
+            </section>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">No results stored for this search yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Search attempts</h2>
+      {% if runs %}
+        <div class="runs-table">
+          <div class="runs-row runs-head">
+            <span>State</span>
+            <span>Query</span>
+            <span>Status</span>
+            <span>Found</span>
+          </div>
+          {% for run in runs %}
+            <div class="runs-row">
+              <span>{{ run.state_code }}</span>
+              <span title="{{ run.query_text }}">{{ run.query_text }}</span>
+              <span>{{ run.status }}</span>
+              <span>{{ run.found_count }}</span>
+            </div>
+            {% if run.error_message %}
+              <p class="error-text">{{ run.error_message }}</p>
+            {% endif %}
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">No runs recorded yet.</p>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}

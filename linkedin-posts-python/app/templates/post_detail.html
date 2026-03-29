@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="card">
+    <p class="eyebrow">Post detail</p>
+    <h1>{{ post.author_name or 'Unknown author' }}</h1>
+    <div class="meta-grid">
+      <div><strong>Best state</strong><span>{{ post.best_state_code or 'Not scored' }}</span></div>
+      <div><strong>State confidence</strong><span>{{ '%.2f'|format(post.state_confidence) }}</span></div>
+      <div><strong>Relative time</strong><span>{{ post.relative_time_text or 'Unavailable' }}</span></div>
+      <div><strong>Source query</strong><span>{{ post.source_query or 'Unavailable' }}</span></div>
+    </div>
+
+    {% if post.permalink %}
+      <p><a class="text-link" href="{{ post.permalink }}" target="_blank" rel="noreferrer">Open original LinkedIn post</a></p>
+    {% endif %}
+
+    {% if post.author_profile_url %}
+      <p><a class="text-link" href="{{ post.author_profile_url }}" target="_blank" rel="noreferrer">Open author profile</a></p>
+    {% endif %}
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h2>Post content</h2>
+      <pre class="content-block">{{ post.content_text }}</pre>
+    </div>
+
+    <div class="card">
+      <h2>Matches</h2>
+      {% if matches %}
+        <div class="stack">
+          {% for match in matches %}
+            <div class="list-card">
+              <div>
+                <strong>{{ match.keywords }}</strong>
+                <p class="meta">{{ match.matched_state_code }} · score {{ '%.2f'|format(match.score) }}</p>
+              </div>
+              <a class="button button-secondary" href="{{ request.url_for('search_detail', search_id=match.search_id) }}">Open search</a>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">No search matches recorded.</p>
+      {% endif %}
+
+      <h2 class="top-gap">Emails found in text</h2>
+      {% if emails %}
+        <ul class="plain-list">
+          {% for email in emails %}
+            <li>{{ email }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="empty">No explicit emails found in this post.</p>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}

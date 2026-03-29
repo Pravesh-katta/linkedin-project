@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ app_name }}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="{{ request.url_for('index') }}">
+          <span class="brand-mark"></span>
+          <span>{{ app_name }}</span>
+        </a>
+        <div class="status-pill {{ 'status-ready' if session_ready else 'status-missing' }}">
+          {% if session_ready %}
+            LinkedIn session ready
+          {% else %}
+            LinkedIn session missing
+          {% endif %}
+        </div>
+      </header>
+
+      {% if message %}
+        <div class="banner">{{ message }}</div>
+      {% endif %}
+
+      <main class="content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </body>
+</html>

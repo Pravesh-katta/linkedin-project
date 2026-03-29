@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero card">
+    <div>
+      <p class="eyebrow">Session-based LinkedIn collection</p>
+      <h1>Search LinkedIn posts across all U.S. states and review them in one place.</h1>
+      <p class="lede">
+        This MVP expands one keyword like <code>python developer</code> into state-aware searches such as
+        <code>python developer "TX"</code> and <code>python developer Texas</code>, stores the results locally,
+        and shows the posts in a reviewable web UI.
+      </p>
+    </div>
+    <div class="card inset-card">
+      <h2>Before you run searches</h2>
+      <ol class="setup-list">
+        <li>Install dependencies and Chromium.</li>
+        <li>Run <code>python scripts/bootstrap_linkedin_session.py</code>.</li>
+        <li>Log in to LinkedIn manually once.</li>
+        <li>Return here and save the session.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h2>Create a saved search</h2>
+      <form method="post" action="{{ request.url_for('create_search') }}" class="form-grid">
+        <label>
+          <span>Keywords</span>
+          <input type="text" name="keywords" placeholder="python developer" required />
+        </label>
+        <label>
+          <span>State scope</span>
+          <select name="state_scope">
+            <option value="all" selected>All states</option>
+            <option value="custom">Only selected states below</option>
+          </select>
+        </label>
+        <div class="state-picker">
+          <p class="helper-text">
+            First live test: choose <code>custom</code> and select 1-2 states like <code>TX</code> or <code>CA</code>.
+          </p>
+          <div class="state-grid">
+            {% for state in all_states %}
+              <label class="state-option">
+                <input type="checkbox" name="enabled_states" value="{{ state.code }}" />
+                <span>{{ state.code }}</span>
+              </label>
+            {% endfor %}
+          </div>
+        </div>
+        <label>
+          <span>Max results per state query</span>
+          <input type="number" name="max_results_per_state" min="1" max="50" value="20" required />
+        </label>
+        <label>
+          <span>Schedule minutes</span>
+          <input type="number" name="schedule_minutes" min="0" value="0" />
+        </label>
+        <button class="button button-primary" type="submit">Create search</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Saved searches</h2>
+      {% if searches %}
+        <div class="stack">
+          {% for search in searches %}
+            <div class="list-card">
+              <div>
+                <h3>{{ search.keywords }}</h3>
+                <p class="meta">
+                  {% if search.state_scope == 'custom' and search.enabled_states %}
+                    {{ search.enabled_states|join(', ') }} ·
+                  {% else %}
+                    all states ·
+                  {% endif %}
+                  {{ search.total_posts }} saved posts
+                  {% if search.last_run_at %}
+                    · last run {{ search.last_run_at }}
+                  {% endif %}
+                </p>
+              </div>
+              <div class="actions">
+                <a class="button button-secondary" href="{{ request.url_for('search_detail', search_id=search.id) }}">Open</a>
+                <form method="post" action="{{ request.url_for('run_search', search_id=search.id) }}">
+                  <button class="button button-primary" type="submit">Run now</button>
+                </form>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty">No saved searches yet.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Recently captured posts</h2>
+    {% if recent_posts %}
+      <div class="posts-grid">
+        {% for post in recent_posts %}
+          <a class="post-card{% if post.viewed_at %} post-card-viewed{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
+            <div class="post-card-head">
+              <p class="post-title">{{ post.author_name or 'Unknown author' }}</p>
+              {% if post.viewed_at %}
+                <span class="post-status post-status-viewed">Seen</span>
+              {% endif %}
+            </div>
+            <p class="post-snippet">{{ post.content_text[:220] }}{% if post.content_text|length > 220 %}…{% endif %}</p>
+            <p class="meta">{{ post.best_state_code or 'Unscored state' }} · {{ post.relative_time_text or 'Time unavailable' }}</p>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty">No posts have been collected yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}
