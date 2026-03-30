@@ -58,6 +58,28 @@ def _group_results(results: list[dict[str, Any]]) -> OrderedDict[str, list[dict[
     return grouped
 
 
+def _selected_state_codes(search: dict[str, Any]) -> list[str]:
+    selected_codes: list[str] = []
+    seen_codes: set[str] = set()
+    for code in search.get("enabled_states", []):
+        upper_code = str(code).upper()
+        if upper_code in STATE_BY_CODE and upper_code not in seen_codes:
+            selected_codes.append(upper_code)
+            seen_codes.add(upper_code)
+    return selected_codes
+
+
+def _state_scope_label(search: dict[str, Any], *, use_names: bool = False) -> str:
+    selected_codes = _selected_state_codes(search)
+    if search.get("state_scope") == "all" or len(selected_codes) == len(ALL_STATES):
+        return "All states"
+    if not selected_codes:
+        return "No states selected"
+    if use_names:
+        return ", ".join(STATE_BY_CODE[code].name for code in selected_codes)
+    return ", ".join(selected_codes)
+
+
 def _run_search_task(search_id: int) -> None:
     SearchRunner(settings).run_search(search_id)
 
@@ -73,6 +95,8 @@ def _purge_expired_posts() -> None:
 async def index(request: Request):
     _purge_expired_posts()
     searches = db.list_searches(settings)
+    for search in searches:
+        search["state_scope_label"] = _state_scope_label(search)
     recent_posts = db.list_recent_posts(15, settings)
     return templates.TemplateResponse(
         request,
@@ -93,14 +117,14 @@ async def create_search(
     keywords: str = Form(...),
     max_results_per_state: int = Form(...),
     schedule_minutes: int = Form(0),
-    state_scope: str = Form("all"),
+    state_scope: str = Form("custom"),
     enabled_states: list[str] = Form([]),
 ):
     cleaned_keywords = " ".join(keywords.split())
     if not cleaned_keywords:
         raise HTTPException(status_code=400, detail="Keywords are required.")
 
-    normalized_state_scope = state_scope if state_scope in {"all", "custom"} else "all"
+    normalized_state_scope = state_scope if state_scope in {"all", "custom"} else "custom"
     normalized_enabled_states: list[str] = []
     seen_codes: set[str] = set()
     for code in enabled_states:
@@ -144,14 +168,12 @@ async def search_detail(request: Request, search_id: int):
     search = db.get_search(search_id, settings)
     if not search:
         raise HTTPException(status_code=404, detail="Search not found.")
+    search["state_scope_label"] = _state_scope_label(search, use_names=True)
 
     results = db.list_results_for_search(search_id, settings)
     grouped_results = _group_results(results)
     runs = db.list_runs_for_search(search_id, settings)
     state_names = {code: STATE_BY_CODE[code].name for code in grouped_results if code in STATE_BY_CODE}
-    enabled_state_names = [
-        STATE_BY_CODE[code].name for code in search.get("enabled_states", []) if code in STATE_BY_CODE
-    ]
 
     return templates.TemplateResponse(
         request,
@@ -162,7 +184,6 @@ async def search_detail(request: Request, search_id: int):
             grouped_results=grouped_results,
             runs=runs,
             state_names=state_names,
-            enabled_state_names=enabled_state_names,
             message=request.query_params.get("message"),
         ),
     )

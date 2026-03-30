@@ -33,8 +33,8 @@
         <label>
           <span>State scope</span>
           <select name="state_scope">
-            <option value="all" selected>All states</option>
-            <option value="custom">Only selected states below</option>
+            <option value="all">All states</option>
+            <option value="custom" selected>Only selected states below</option>
           </select>
         </label>
         <div class="state-picker">
@@ -71,11 +71,7 @@
               <div>
                 <h3>{{ search.keywords }}</h3>
                 <p class="meta">
-                  {% if search.state_scope == 'custom' and search.enabled_states %}
-                    {{ search.enabled_states|join(', ') }} ·
-                  {% else %}
-                    all states ·
-                  {% endif %}
+                  {{ search.state_scope_label }} ·
                   {{ search.total_posts }} saved posts
                   {% if search.last_run_at %}
                     · last run {{ search.last_run_at }}

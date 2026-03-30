@@ -18,13 +18,7 @@
     <div class="meta-grid">
       <div>
         <strong>State scope</strong>
-        <span>
-          {% if search.state_scope == 'custom' and enabled_state_names %}
-            {{ enabled_state_names|join(', ') }}
-          {% else %}
-            All states
-          {% endif %}
-        </span>
+        <span>{{ search.state_scope_label }}</span>
       </div>
       <div><strong>Window</strong><span>{{ search.window_hours }} hours</span></div>
       <div><strong>Max per state query</strong><span>{{ search.max_results_per_state }}</span></div>

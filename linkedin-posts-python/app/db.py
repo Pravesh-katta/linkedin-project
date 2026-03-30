@@ -14,7 +14,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS searches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     keywords TEXT NOT NULL,
-    state_scope TEXT NOT NULL DEFAULT 'all',
+    state_scope TEXT NOT NULL DEFAULT 'custom',
     enabled_states_json TEXT NOT NULL DEFAULT '[]',
     window_hours INTEGER NOT NULL DEFAULT 24,
     max_results_per_state INTEGER NOT NULL DEFAULT 20,
@@ -116,13 +116,24 @@ def _ensure_post_view_tracking(connection: sqlite3.Connection) -> None:
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
-    return {key: row[key] for key in row.keys()}
+    data = {key: row[key] for key in row.keys()}
+    raw_enabled_states = data.get("enabled_states_json")
+    if isinstance(raw_enabled_states, str):
+        try:
+            parsed_enabled_states = json.loads(raw_enabled_states)
+        except json.JSONDecodeError:
+            parsed_enabled_states = []
+        if isinstance(parsed_enabled_states, list):
+            data["enabled_states"] = [str(code) for code in parsed_enabled_states]
+        else:
+            data["enabled_states"] = []
+    return data
 
 
 def create_search(
     keywords: str,
     *,
-    state_scope: str = "all",
+    state_scope: str = "custom",
     enabled_states: list[str] | None = None,
     window_hours: int = 24,
     max_results_per_state: int = 20,
