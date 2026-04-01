@@ -3,7 +3,10 @@
 {% block content %}
   <section class="card">
     <p class="eyebrow">Post detail</p>
-    <h1>{{ post.author_name or 'Unknown author' }}</h1>
+    <h1>{{ post.display_title or post.author_name or 'Unknown author' }}</h1>
+    {% if post.display_has_group_title %}
+      <p class="meta" style="margin-top: 6px;">Posted by {{ post.display_author_name }}</p>
+    {% endif %}
 
     {% if post.resume_match_pct %}
       <div class="resume-match-card">

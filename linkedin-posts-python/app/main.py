@@ -101,6 +101,43 @@ def _result_sort_timestamp(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _normalize_display_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _extract_group_post_title(content_text: str | None, author_name: str | None) -> str | None:
+    content = _normalize_display_text(content_text)
+    author = _normalize_display_text(author_name)
+    if not content:
+        return None
+    if content.lower().startswith("feed post "):
+        content = content[len("Feed post ") :].strip()
+    if not author:
+        return None
+    author_index = content.find(author)
+    if author_index <= 0:
+        return None
+    title = content[:author_index].strip(" -•")
+    if title.lower().startswith("new post in "):
+        title = title[len("New post in ") :].strip()
+    return title or None
+
+
+def _annotate_post_for_display(post: dict[str, Any]) -> dict[str, Any]:
+    author_name = _normalize_display_text(post.get("author_name")) or None
+    display_title = _extract_group_post_title(post.get("content_text"), author_name)
+    post["display_author_name"] = author_name or "Unknown author"
+    post["display_title"] = display_title or post["display_author_name"]
+    post["display_has_group_title"] = bool(display_title and display_title != author_name)
+    return post
+
+
+def _annotate_posts_for_display(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for post in posts:
+        _annotate_post_for_display(post)
+    return posts
+
+
 def _merge_results(
     primary_results: list[dict[str, Any]],
     additional_results: list[dict[str, Any]],
@@ -201,6 +238,7 @@ def _render_index(
             post["resume_match_pct"] = round(score * 100, 1) if score >= resume_threshold else 0
         else:
             post["resume_match_pct"] = 0
+    _annotate_posts_for_display(recent_posts)
 
     return templates.TemplateResponse(
         request,
@@ -335,6 +373,7 @@ async def search_detail(request: Request, search_id: int):
             post["resume_match_pct"] = round(score * 100, 1) if score >= resume_threshold else 0
         else:
             post["resume_match_pct"] = 0
+    _annotate_posts_for_display(merged_results)
 
     # When a resume is active: score posts but show ALL of them
     # (badge shows match %, but nothing is hidden)
@@ -388,6 +427,7 @@ async def post_detail(request: Request, post_id: int):
     else:
         post["resume_match_pct"] = 0
         post["resume_matched_keywords"] = []
+    _annotate_post_for_display(post)
 
     return templates.TemplateResponse(
         request,
@@ -492,6 +532,7 @@ async def resume_matches(request: Request):
         match_threshold=threshold,
         settings=settings,
     )
+    _annotate_posts_for_display(matched_posts)
 
     return templates.TemplateResponse(
         request,

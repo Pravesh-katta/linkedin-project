@@ -65,7 +65,12 @@
                 {% for post in posts %}
                   <a class="post-card{% if post.viewed_at %} post-card-viewed{% endif %}{% if post.resume_match_pct %} post-card-resume{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
                     <div class="post-card-head">
-                      <strong>{{ post.author_name or 'Unknown author' }}</strong>
+                      <div>
+                        <strong>{{ post.display_title or post.author_name or 'Unknown author' }}</strong>
+                        {% if post.display_has_group_title %}
+                          <p class="meta">{{ post.display_author_name }}</p>
+                        {% endif %}
+                      </div>
                       <div class="post-card-flags">
                         {% if post.resume_match_pct %}
                           <span class="resume-badge">🎯 {{ post.resume_match_pct }}%</span>
@@ -110,7 +115,12 @@
                 {% for post in posts %}
                   <a class="post-card post-card-viewed{% if post.resume_match_pct %} post-card-resume{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
                     <div class="post-card-head">
-                      <strong>{{ post.author_name or 'Unknown author' }}</strong>
+                      <div>
+                        <strong>{{ post.display_title or post.author_name or 'Unknown author' }}</strong>
+                        {% if post.display_has_group_title %}
+                          <p class="meta">{{ post.display_author_name }}</p>
+                        {% endif %}
+                      </div>
                       <div class="post-card-flags">
                         {% if post.resume_match_pct %}
                           <span class="resume-badge">🎯 {{ post.resume_match_pct }}%</span>
