@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from .config import Settings, get_settings
 from .post_age import linkedin_post_is_within_hours, linkedin_posted_at
+from .scoring import keyword_match_score
 
 
 SCHEMA = """
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS searches (
     keywords TEXT NOT NULL,
     state_scope TEXT NOT NULL DEFAULT 'custom',
     enabled_states_json TEXT NOT NULL DEFAULT '[]',
+    capture_mode TEXT NOT NULL DEFAULT 'standard',
     window_hours INTEGER NOT NULL DEFAULT 24,
     max_results_per_state INTEGER NOT NULL DEFAULT 20,
     schedule_minutes INTEGER NOT NULL DEFAULT 0,
@@ -73,6 +75,16 @@ CREATE INDEX IF NOT EXISTS idx_search_runs_search_id ON search_runs(search_id);
 CREATE INDEX IF NOT EXISTS idx_search_results_search_id ON search_results(search_id);
 CREATE INDEX IF NOT EXISTS idx_search_results_post_id ON search_results(post_id);
 CREATE INDEX IF NOT EXISTS idx_posts_last_seen_at ON posts(last_seen_at);
+
+CREATE TABLE IF NOT EXISTS resumes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,
+    extracted_text TEXT NOT NULL,
+    extracted_keywords_json TEXT NOT NULL DEFAULT '[]',
+    match_threshold REAL NOT NULL DEFAULT 0.30,
+    uploaded_at TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1
+);
 """
 
 
@@ -100,7 +112,28 @@ def get_connection(settings: Settings | None = None) -> Iterator[sqlite3.Connect
 def init_db(settings: Settings | None = None) -> None:
     with get_connection(settings) as connection:
         connection.executescript(SCHEMA)
+        _ensure_search_capture_mode(connection)
+        _remove_search_run_audit(connection)
         _ensure_post_view_tracking(connection)
+        _ensure_resumes_table(connection)
+
+
+def _ensure_search_capture_mode(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(searches)").fetchall()
+    }
+    if "capture_mode" not in columns:
+        connection.execute("ALTER TABLE searches ADD COLUMN capture_mode TEXT NOT NULL DEFAULT 'standard'")
+
+
+def _remove_search_run_audit(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(search_runs)").fetchall()
+    }
+    if "audit_json" in columns:
+        connection.execute("ALTER TABLE search_runs DROP COLUMN audit_json")
 
 
 def _ensure_post_view_tracking(connection: sqlite3.Connection) -> None:
@@ -113,10 +146,35 @@ def _ensure_post_view_tracking(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_posts_viewed_at ON posts(viewed_at)")
 
 
+def _ensure_resumes_table(connection: sqlite3.Connection) -> None:
+    tables = {
+        row["name"]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "resumes" not in tables:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resumes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                extracted_text TEXT NOT NULL,
+                extracted_keywords_json TEXT NOT NULL DEFAULT '[]',
+                match_threshold REAL NOT NULL DEFAULT 0.30,
+                uploaded_at TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+
+
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     data = {key: row[key] for key in row.keys()}
+    if "capture_mode" in data and data["capture_mode"] not in {"standard", "balanced", "deep"}:
+        data["capture_mode"] = "standard"
     raw_enabled_states = data.get("enabled_states_json")
     if isinstance(raw_enabled_states, str):
         try:
@@ -135,6 +193,7 @@ def create_search(
     *,
     state_scope: str = "custom",
     enabled_states: list[str] | None = None,
+    capture_mode: str = "standard",
     window_hours: int = 24,
     max_results_per_state: int = 20,
     schedule_minutes: int = 0,
@@ -147,14 +206,15 @@ def create_search(
         cursor = connection.execute(
             """
             INSERT INTO searches (
-                keywords, state_scope, enabled_states_json, window_hours,
+                keywords, state_scope, enabled_states_json, capture_mode, window_hours,
                 max_results_per_state, schedule_minutes, is_active, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 keywords.strip(),
                 state_scope,
                 enabled_states_json,
+                capture_mode,
                 window_hours,
                 max_results_per_state,
                 schedule_minutes,
@@ -245,6 +305,55 @@ def finish_search_run(
         )
 
 
+def mark_stale_running_search_runs_failed(
+    *,
+    stale_after_minutes: int = 15,
+    settings: Settings | None = None,
+) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, stale_after_minutes))
+    stale_run_ids: list[int] = []
+    with get_connection(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, started_at
+            FROM search_runs
+            WHERE status = 'running'
+            """
+        ).fetchall()
+        for row in rows:
+            started_at_raw = str(row["started_at"] or "").strip()
+            if not started_at_raw:
+                stale_run_ids.append(int(row["id"]))
+                continue
+            try:
+                started_at = datetime.fromisoformat(started_at_raw)
+            except ValueError:
+                stale_run_ids.append(int(row["id"]))
+                continue
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if started_at <= cutoff:
+                stale_run_ids.append(int(row["id"]))
+
+        now = utcnow_iso()
+        for run_id in stale_run_ids:
+            connection.execute(
+                """
+                UPDATE search_runs
+                SET status = 'failed',
+                    finished_at = ?,
+                    error_message = ?
+                WHERE id = ?
+                """,
+                (
+                    now,
+                    "Marked failed automatically because the previous run appears stale.",
+                    run_id,
+                ),
+            )
+    return len(stale_run_ids)
+
+
 def list_runs_for_search(search_id: int, settings: Settings | None = None) -> list[dict[str, Any]]:
     with get_connection(settings) as connection:
         rows = connection.execute(
@@ -280,10 +389,18 @@ def upsert_post(
     now = utcnow_iso()
     with get_connection(settings) as connection:
         existing = connection.execute(
-            "SELECT id FROM posts WHERE external_id = ?",
+            """
+            SELECT id, best_state_code, state_confidence, source_query
+            FROM posts
+            WHERE external_id = ?
+            """,
             (external_id,),
         ).fetchone()
         if existing:
+            existing_state_confidence = float(existing["state_confidence"] or 0.0)
+            existing_best_state_code = existing["best_state_code"]
+            existing_source_query = existing["source_query"]
+            should_replace_state = not existing_best_state_code or state_confidence >= existing_state_confidence
             connection.execute(
                 """
                 UPDATE posts
@@ -299,9 +416,9 @@ def upsert_post(
                     content_text,
                     relative_time_text,
                     absolute_posted_at,
-                    best_state_code,
-                    state_confidence,
-                    source_query,
+                    best_state_code if should_replace_state else existing_best_state_code,
+                    state_confidence if should_replace_state else existing_state_confidence,
+                    source_query if should_replace_state or not existing_source_query else existing_source_query,
                     now,
                     external_id,
                 ),
@@ -341,9 +458,9 @@ def link_search_result(
     matched_state_code: str,
     score: float,
     settings: Settings | None = None,
-) -> None:
+) -> bool:
     with get_connection(settings) as connection:
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT OR IGNORE INTO search_results (
                 search_id, run_id, post_id, matched_state_code, score, created_at
@@ -351,10 +468,15 @@ def link_search_result(
             """,
             (search_id, run_id, post_id, matched_state_code, score, utcnow_iso()),
         )
+    return cursor.rowcount > 0
 
 
 def list_results_for_search(search_id: int, settings: Settings | None = None) -> list[dict[str, Any]]:
     with get_connection(settings) as connection:
+        search_row = connection.execute(
+            "SELECT keywords FROM searches WHERE id = ?",
+            (search_id,),
+        ).fetchone()
         rows = connection.execute(
             """
             SELECT
@@ -369,7 +491,13 @@ def list_results_for_search(search_id: int, settings: Settings | None = None) ->
             """,
             (search_id,),
         ).fetchall()
-    results = [row_to_dict(row) for row in rows]
+    keywords = search_row["keywords"] if search_row else ""
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        data = row_to_dict(row)
+        if not data:
+            continue
+        results.append(data)
     results.sort(
         key=lambda row: (
             row["matched_state_code"],
@@ -381,11 +509,74 @@ def list_results_for_search(search_id: int, settings: Settings | None = None) ->
     return results
 
 
+def list_related_posts_for_search(
+    search_id: int,
+    *,
+    keywords: str,
+    state_codes: list[str] | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:
+    clauses = [
+        "p.best_state_code IS NOT NULL",
+        "p.id NOT IN (SELECT post_id FROM search_results WHERE search_id = ?)",
+    ]
+    params: list[Any] = [search_id]
+
+    normalized_state_codes = [str(code).upper() for code in (state_codes or []) if str(code).strip()]
+    if normalized_state_codes:
+        placeholders = ", ".join("?" for _ in normalized_state_codes)
+        clauses.append(f"p.best_state_code IN ({placeholders})")
+        params.extend(normalized_state_codes)
+
+    where_sql = " AND ".join(clauses)
+    with get_connection(settings) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT p.*
+            FROM posts p
+            WHERE {where_sql}
+            """,
+            params,
+        ).fetchall()
+
+    related_posts: list[dict[str, Any]] = []
+    for row in rows:
+        data = row_to_dict(row)
+        if not data:
+            continue
+        score = keyword_match_score(data.get("content_text", ""), keywords)
+        if score <= 0:
+            continue
+        data["matched_state_code"] = data.get("best_state_code")
+        data["score"] = score
+        data["match_type"] = "related"
+        related_posts.append(data)
+
+    related_posts.sort(
+        key=lambda row: (
+            row["matched_state_code"],
+            -_linkedin_post_sort_timestamp(row),
+            -(float(row.get("score") or 0.0)),
+            -(int(row.get("id") or 0)),
+        )
+    )
+    if limit and limit > 0:
+        return related_posts[:limit]
+    return related_posts
+
+
 def list_recent_posts(limit: int = 25, settings: Settings | None = None) -> list[dict[str, Any]]:
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
-            SELECT * FROM posts
+            SELECT p.*
+            FROM posts p
+            WHERE EXISTS (
+                SELECT 1
+                FROM search_results sr
+                WHERE sr.post_id = p.id
+            )
             """,
         ).fetchall()
     posts = [row_to_dict(row) for row in rows]
@@ -491,3 +682,89 @@ def list_post_matches(post_id: int, settings: Settings | None = None) -> list[di
             (post_id,),
         ).fetchall()
     return [row_to_dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+#  Resume operations
+# ---------------------------------------------------------------------------
+
+
+def save_resume(
+    filename: str,
+    extracted_text: str,
+    extracted_keywords: list[str],
+    match_threshold: float = 0.05,
+    settings: Settings | None = None,
+) -> int:
+    """Save a new resume.  Deactivates any previously active resume."""
+    now = utcnow_iso()
+    keywords_json = json.dumps(extracted_keywords)
+    with get_connection(settings) as connection:
+        # Deactivate previous resumes
+        connection.execute("UPDATE resumes SET is_active = 0 WHERE is_active = 1")
+        cursor = connection.execute(
+            """
+            INSERT INTO resumes (
+                filename, extracted_text, extracted_keywords_json,
+                match_threshold, uploaded_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            (filename, extracted_text, keywords_json, match_threshold, now),
+        )
+        return int(cursor.lastrowid)
+
+
+def get_active_resume(settings: Settings | None = None) -> dict[str, Any] | None:
+    """Return the currently active resume, or None."""
+    with get_connection(settings) as connection:
+        row = connection.execute(
+            "SELECT * FROM resumes WHERE is_active = 1 ORDER BY uploaded_at DESC LIMIT 1"
+        ).fetchone()
+    if row is None:
+        return None
+    data = {key: row[key] for key in row.keys()}
+    raw_keywords = data.get("extracted_keywords_json", "[]")
+    try:
+        data["keywords"] = json.loads(raw_keywords) if isinstance(raw_keywords, str) else []
+    except json.JSONDecodeError:
+        data["keywords"] = []
+    return data
+
+
+def delete_resume(resume_id: int, settings: Settings | None = None) -> None:
+    with get_connection(settings) as connection:
+        connection.execute("DELETE FROM resumes WHERE id = ?", (resume_id,))
+
+
+def list_resume_matched_posts(
+    resume_keywords: list[str],
+    match_threshold: float = 0.30,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:
+    """Return all posts that match > threshold of the resume keywords."""
+    from .services.resume_parser import resume_match_score
+
+    with get_connection(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT p.*
+            FROM posts p
+            WHERE EXISTS (
+                SELECT 1 FROM search_results sr WHERE sr.post_id = p.id
+            )
+            """
+        ).fetchall()
+
+    matched: list[dict[str, Any]] = []
+    for row in rows:
+        data = row_to_dict(row)
+        if not data:
+            continue
+        score = resume_match_score(data.get("content_text", ""), resume_keywords)
+        if score >= match_threshold:
+            data["resume_match_score"] = round(score, 4)
+            data["resume_match_pct"] = round(score * 100, 1)
+            matched.append(data)
+
+    matched.sort(key=lambda r: -r["resume_match_score"])
+    return matched

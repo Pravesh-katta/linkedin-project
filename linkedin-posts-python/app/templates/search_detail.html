@@ -7,7 +7,12 @@
         <p class="eyebrow">Saved search</p>
         <h1>{{ search.keywords }}</h1>
         <p class="lede">
-          State-aware search across all enabled U.S. states. Each state is queried using both abbreviation and full-name variants.
+          Searches LinkedIn for <strong>Posts · Latest · Past 24 hours</strong> across enabled U.S. states.
+          {% if active_resume %}
+            Posts are scored against your resume, and matches ≥{{ (active_resume.match_threshold * 100)|int }}% are highlighted.
+          {% else %}
+            Upload a resume on the home page to score results against your skills.
+          {% endif %}
         </p>
       </div>
       <form method="post" action="{{ request.url_for('run_search', search_id=search.id) }}">
@@ -16,23 +21,41 @@
     </div>
 
     <div class="meta-grid">
-      <div>
-        <strong>State scope</strong>
-        <span>{{ search.state_scope_label }}</span>
-      </div>
+      <div><strong>State scope</strong><span>{{ search.state_scope_label }}</span></div>
+      <div><strong>Capture mode</strong><span>{{ search.capture_mode_label }}</span></div>
+      <div><strong>Core match</strong><span>{{ search_core_terms|join(', ') if search_core_terms else search.keywords }}</span></div>
       <div><strong>Window</strong><span>{{ search.window_hours }} hours</span></div>
-      <div><strong>Max per state query</strong><span>{{ search.max_results_per_state }}</span></div>
+      <div><strong>Target per state</strong><span>{{ search.max_results_per_state }}</span></div>
       <div><strong>Schedule</strong><span>{{ search.schedule_minutes }} minutes</span></div>
       <div><strong>Last run</strong><span>{{ search.last_run_at or 'Not yet run' }}</span></div>
+      <div><strong>Run status</strong><span>{{ latest_attempt.status if latest_attempt else 'Not yet run' }}</span></div>
+      <div><strong>Matched posts</strong><span>{{ new_results_count + seen_results_count }}</span></div>
     </div>
+
+    {% if active_resume %}
+      <div class="resume-filter-pill">
+        🎯 Resume scoring: <strong>{{ active_resume.filename }}</strong> · {{ active_resume.keywords|length }} skills · highlight at ≥{{ (active_resume.match_threshold * 100)|int }}%
+      </div>
+    {% else %}
+      <div class="resume-filter-pill resume-filter-missing">
+        ⚠️ No resume uploaded. All scraped posts are shown. <a href="{{ request.url_for('index') }}">Upload your resume</a> to narrow results to your skills.
+      </div>
+    {% endif %}
+
+    {% if latest_attempt and latest_attempt.status == 'running' %}
+      <p class="meta" style="margin-top:10px;">Search is still running. This page refreshes every 5 seconds until complete.</p>
+    {% endif %}
   </section>
 
-  <section class="grid">
-    <div class="card">
-      <h2>Grouped post results</h2>
-      {% if grouped_results %}
+  <section class="results-board">
+    <div class="card results-column results-column-latest">
+      <div class="lane-head">
+        <h2>Latest posts</h2>
+        <span>{{ new_results_count }}</span>
+      </div>
+      {% if new_grouped_results %}
         <div class="state-groups">
-          {% for state_code, posts in grouped_results.items() %}
+          {% for state_code, posts in new_grouped_results.items() %}
             <section class="state-group">
               <div class="state-head">
                 <h3>{{ state_names.get(state_code, state_code) }}</h3>
@@ -40,14 +63,14 @@
               </div>
               <div class="stack">
                 {% for post in posts %}
-                  <a class="post-card{% if post.viewed_at %} post-card-viewed{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
+                  <a class="post-card{% if post.viewed_at %} post-card-viewed{% endif %}{% if post.resume_match_pct %} post-card-resume{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
                     <div class="post-card-head">
                       <strong>{{ post.author_name or 'Unknown author' }}</strong>
                       <div class="post-card-flags">
-                        {% if post.viewed_at %}
-                          <span class="post-status post-status-viewed">Seen</span>
+                        {% if post.resume_match_pct %}
+                          <span class="resume-badge">🎯 {{ post.resume_match_pct }}%</span>
                         {% endif %}
-                        <span>score {{ '%.2f'|format(post.score) }}</span>
+                        <span class="post-status">Not seen</span>
                       </div>
                     </div>
                     <p class="post-snippet">{{ post.content_text[:260] }}{% if post.content_text|length > 260 %}…{% endif %}</p>
@@ -59,34 +82,52 @@
           {% endfor %}
         </div>
       {% else %}
-        <p class="empty">No results stored for this search yet.</p>
+        <div class="empty-state">
+          {% if active_resume %}
+            <p>No posts yet matched ≥{{ (active_resume.match_threshold * 100)|int }}% of your resume skills.</p>
+            <p class="meta">Try running the search again, or check that your resume has been parsed correctly.</p>
+          {% else %}
+            <p>No posts collected yet. Run the search to fetch LinkedIn posts.</p>
+          {% endif %}
+        </div>
       {% endif %}
     </div>
 
-    <div class="card">
-      <h2>Search attempts</h2>
-      {% if runs %}
-        <div class="runs-table">
-          <div class="runs-row runs-head">
-            <span>State</span>
-            <span>Query</span>
-            <span>Status</span>
-            <span>Found</span>
-          </div>
-          {% for run in runs %}
-            <div class="runs-row">
-              <span>{{ run.state_code }}</span>
-              <span title="{{ run.query_text }}">{{ run.query_text }}</span>
-              <span>{{ run.status }}</span>
-              <span>{{ run.found_count }}</span>
-            </div>
-            {% if run.error_message %}
-              <p class="error-text">{{ run.error_message }}</p>
-            {% endif %}
+    <div class="card results-column results-column-seen">
+      <div class="lane-head">
+        <h2>Seen posts</h2>
+        <span>{{ seen_results_count }}</span>
+      </div>
+      {% if seen_grouped_results %}
+        <div class="state-groups">
+          {% for state_code, posts in seen_grouped_results.items() %}
+            <section class="state-group">
+              <div class="state-head">
+                <h3>{{ state_names.get(state_code, state_code) }}</h3>
+                <span>{{ posts|length }} posts</span>
+              </div>
+              <div class="stack">
+                {% for post in posts %}
+                  <a class="post-card post-card-viewed{% if post.resume_match_pct %} post-card-resume{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
+                    <div class="post-card-head">
+                      <strong>{{ post.author_name or 'Unknown author' }}</strong>
+                      <div class="post-card-flags">
+                        {% if post.resume_match_pct %}
+                          <span class="resume-badge">🎯 {{ post.resume_match_pct }}%</span>
+                        {% endif %}
+                        <span class="post-status post-status-viewed">Seen</span>
+                      </div>
+                    </div>
+                    <p class="post-snippet">{{ post.content_text[:260] }}{% if post.content_text|length > 260 %}…{% endif %}</p>
+                    <p class="meta">{{ post.relative_time_text or 'Time unavailable' }}</p>
+                  </a>
+                {% endfor %}
+              </div>
+            </section>
           {% endfor %}
         </div>
       {% else %}
-        <p class="empty">No runs recorded yet.</p>
+        <p class="empty">No seen posts yet.</p>
       {% endif %}
     </div>
   </section>

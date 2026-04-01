@@ -4,6 +4,22 @@
   <section class="card">
     <p class="eyebrow">Post detail</p>
     <h1>{{ post.author_name or 'Unknown author' }}</h1>
+
+    {% if post.resume_match_pct %}
+      <div class="resume-match-card">
+        <div class="resume-match-header">
+          <span class="resume-badge resume-badge-large">🎯 {{ post.resume_match_pct }}% Resume Match</span>
+        </div>
+        {% if post.resume_matched_keywords %}
+          <div class="resume-keywords">
+            {% for kw in post.resume_matched_keywords %}
+              <span class="keyword-tag keyword-tag-matched">{{ kw }}</span>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    {% endif %}
+
     <div class="meta-grid">
       <div><strong>Best state</strong><span>{{ post.best_state_code or 'Not scored' }}</span></div>
       <div><strong>State confidence</strong><span>{{ '%.2f'|format(post.state_confidence) }}</span></div>

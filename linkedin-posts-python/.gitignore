@@ -1,6 +1,8 @@
 .env
 .venv/
+.venv-codex/
 __pycache__/
 *.pyc
 data/app.db
 data/linkedin_storage_state.json
+data/logs/

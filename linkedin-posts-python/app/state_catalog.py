@@ -84,7 +84,4 @@ def resolve_enabled_states(state_scope: str, enabled_state_codes: list[str] | No
 
 def build_state_query_variants(keywords: str, state: State) -> list[str]:
     base = " ".join(keywords.split())
-    return [
-        f'{base} "{state.code}"',
-        f"{base} {state.name}",
-    ]
+    return [f'{base}, "{state.code}"']

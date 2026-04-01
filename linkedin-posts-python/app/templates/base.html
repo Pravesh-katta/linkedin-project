@@ -4,7 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ app_name }}</title>
-    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}" />
+    {% if auto_refresh_seconds %}
+      <meta http-equiv="refresh" content="{{ auto_refresh_seconds }}" />
+    {% endif %}
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}?v={{ static_version }}" />
   </head>
   <body>
     <div class="page-shell">

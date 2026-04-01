@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="card">
+    <div class="split-head">
+      <div>
+        <p class="eyebrow">Resume matching</p>
+        <h1>Posts matching your resume</h1>
+        <p class="lede">
+          Showing posts where &gt;{{ (active_resume.match_threshold * 100)|int }}% of your resume skills appear in the post content.
+          Based on <strong>{{ active_resume.keywords|length }}</strong> extracted skills from <strong>{{ active_resume.filename }}</strong>.
+        </p>
+      </div>
+      <div class="actions">
+        <a class="button button-secondary" href="{{ request.url_for('index') }}">← Back</a>
+      </div>
+    </div>
+
+    <div class="resume-keywords" style="margin-top: 16px;">
+      {% for kw in active_resume.keywords[:30] %}
+        <span class="keyword-tag">{{ kw }}</span>
+      {% endfor %}
+      {% if active_resume.keywords|length > 30 %}
+        <span class="keyword-tag keyword-tag-more">+{{ active_resume.keywords|length - 30 }} more</span>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="lane-head">
+      <h2>Matched posts</h2>
+      <span>{{ total_matched }}</span>
+    </div>
+
+    {% if matched_posts %}
+      <div class="posts-grid" style="margin-top: 16px;">
+        {% for post in matched_posts %}
+          <a class="post-card post-card-resume{% if post.viewed_at %} post-card-viewed{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
+            <div class="post-card-head">
+              <strong>{{ post.author_name or 'Unknown author' }}</strong>
+              <div class="post-card-flags">
+                <span class="resume-badge resume-badge-large">🎯 {{ post.resume_match_pct }}%</span>
+                {% if post.viewed_at %}
+                  <span class="post-status post-status-viewed">Seen</span>
+                {% endif %}
+              </div>
+            </div>
+            <p class="post-snippet">{{ post.content_text[:300] }}{% if post.content_text|length > 300 %}…{% endif %}</p>
+            <p class="meta">{{ post.best_state_code or 'Unscored state' }} · {{ post.relative_time_text or 'Time unavailable' }}</p>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty" style="margin-top: 16px;">No posts match your resume above the {{ (active_resume.match_threshold * 100)|int }}% threshold yet. Run some searches first, then check back.</p>
+    {% endif %}
+  </section>
+{% endblock %}

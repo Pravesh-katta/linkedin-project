@@ -8,12 +8,103 @@ from .state_catalog import State
 
 WHITESPACE_RE = re.compile(r"\s+")
 WORD_RE = re.compile(r"[a-zA-Z0-9]+")
+ROLE_STOPWORDS = {
+    "developer",
+    "developers",
+    "engineer",
+    "engineers",
+    "architect",
+    "architects",
+    "analyst",
+    "analysts",
+    "lead",
+    "leads",
+    "senior",
+    "sr",
+    "junior",
+    "jr",
+    "principal",
+    "staff",
+    "software",
+    "application",
+    "applications",
+    "app",
+    "apps",
+    "backend",
+    "frontend",
+    "fullstack",
+    "full",
+    "stack",
+    "specialist",
+    "manager",
+    "consultant",
+    "consultants",
+    "programmer",
+    "programmers",
+    "admin",
+    "administrator",
+    "admins",
+    "qa",
+    "tester",
+    "testing",
+    "role",
+    "roles",
+    "position",
+    "positions",
+    "job",
+    "jobs",
+    "opening",
+    "openings",
+    "hiring",
+    "opportunity",
+    "opportunities",
+    "contract",
+    "contracts",
+    "remote",
+    "onsite",
+    "hybrid",
+}
 
 
 def normalize_text(value: str | None) -> str:
     if not value:
         return ""
     return WHITESPACE_RE.sub(" ", value).strip()
+
+
+def _normalize_keyword_token(token: str) -> str:
+    value = token.lower().strip()
+    if len(value) > 4 and value.endswith("ies"):
+        return f"{value[:-3]}y"
+    if len(value) > 4 and value.endswith("es"):
+        return value[:-2]
+    if len(value) > 3 and value.endswith("s"):
+        return value[:-1]
+    return value
+
+
+def _token_set(value: str | None) -> set[str]:
+    normalized = normalize_text(value)
+    return {_normalize_keyword_token(token) for token in WORD_RE.findall(normalized) if token}
+
+
+def _ordered_tokens(value: str | None) -> list[str]:
+    normalized = normalize_text(value)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in WORD_RE.findall(normalized):
+        normalized_token = _normalize_keyword_token(token)
+        if not normalized_token or normalized_token in seen:
+            continue
+        seen.add(normalized_token)
+        ordered.append(normalized_token)
+    return ordered
+
+
+def keyword_focus_terms(keywords: str) -> list[str]:
+    ordered_tokens = [token for token in _ordered_tokens(keywords) if len(token) > 1]
+    focused = [token for token in ordered_tokens if token not in ROLE_STOPWORDS]
+    return focused or ordered_tokens
 
 
 def dedupe_fingerprint(permalink: str | None, author_name: str | None, content_text: str | None) -> str:
@@ -29,8 +120,8 @@ def dedupe_fingerprint(permalink: str | None, author_name: str | None, content_t
 
 
 def keyword_match_score(content_text: str, keywords: str) -> float:
-    content_words = set(WORD_RE.findall(normalize_text(content_text).lower()))
-    keyword_words = [word for word in WORD_RE.findall(normalize_text(keywords).lower()) if len(word) > 1]
+    content_words = _token_set(content_text)
+    keyword_words = keyword_focus_terms(keywords)
     if not keyword_words:
         return 0.0
     matched = sum(1 for word in keyword_words if word in content_words)

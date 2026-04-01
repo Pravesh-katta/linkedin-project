@@ -6,9 +6,9 @@
       <p class="eyebrow">Session-based LinkedIn collection</p>
       <h1>Search LinkedIn posts across all U.S. states and review them in one place.</h1>
       <p class="lede">
-        This MVP expands one keyword like <code>python developer</code> into state-aware searches such as
-        <code>python developer "TX"</code> and <code>python developer Texas</code>, stores the results locally,
-        and shows the posts in a reviewable web UI.
+        Expands one keyword like <code>python developer</code> into state-based searches like
+        <code>python developer "TX"</code> and <code>python developer Texas</code> — filtered by <strong>Posts · Latest · Past 24 hours</strong>.
+        Upload your resume to score posts against your skills.
       </p>
     </div>
     <div class="card inset-card">
@@ -22,42 +22,97 @@
     </div>
   </section>
 
+  {# ── Resume section ─────────────────────────────────────────────── #}
+  <section class="card resume-section">
+    <div class="resume-row">
+      <div class="resume-left">
+        <h2>📄 Resume Matching</h2>
+        {% if active_resume %}
+          <p class="meta">
+            <strong>{{ active_resume.filename }}</strong> · {{ active_resume.keywords|length }} skills extracted ·
+            <span class="badge-inline">≥{{ (active_resume.match_threshold * 100)|int }}% match threshold</span>
+          </p>
+          <p class="meta" style="margin-top:4px;">
+            Search results keep matching your keyword and show a resume-match badge
+            when a post reaches at least {{ (active_resume.match_threshold * 100)|int }}% of your resume skills.
+          </p>
+          <div class="resume-keywords">
+            {% for kw in active_resume.keywords[:20] %}
+              <span class="keyword-tag">{{ kw }}</span>
+            {% endfor %}
+            {% if active_resume.keywords|length > 20 %}
+              <span class="keyword-tag keyword-tag-more">+{{ active_resume.keywords|length - 20 }} more</span>
+            {% endif %}
+          </div>
+        {% else %}
+          <p class="meta">
+            No resume uploaded yet. Upload your resume (DOCX, PDF, or TXT) and posts scrapped from LinkedIn
+            will be scored against your skills so matching posts stand out in the dashboard.
+          </p>
+        {% endif %}
+      </div>
+      <div class="resume-right">
+        <form method="post" action="{{ request.url_for('upload_resume') }}" enctype="multipart/form-data" class="resume-upload-form">
+          <input type="file" name="resume_file" accept=".docx,.pdf,.txt,.text,.md" required />
+          <button class="button button-primary" type="submit">{{ 'Replace resume' if active_resume else 'Upload resume' }}</button>
+        </form>
+        {% if active_resume %}
+          <form method="post" action="{{ request.url_for('delete_resume') }}" style="margin-top:8px;">
+            <button class="button button-danger-small" type="submit">Remove resume</button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
+  {# ── Search form + saved searches ───────────────────────────────── #}
   <section class="grid">
     <div class="card">
       <h2>Create a saved search</h2>
       <form method="post" action="{{ request.url_for('create_search') }}" class="form-grid">
         <label>
           <span>Keywords</span>
-          <input type="text" name="keywords" placeholder="python developer" required />
+          <input type="text" name="keywords" placeholder="python developer" value="{{ search_form.keywords }}" required />
         </label>
         <label>
           <span>State scope</span>
           <select name="state_scope">
-            <option value="all">All states</option>
-            <option value="custom" selected>Only selected states below</option>
+            <option value="all"{% if search_form.state_scope == 'all' %} selected{% endif %}>All states</option>
+            <option value="custom"{% if search_form.state_scope != 'all' %} selected{% endif %}>Only selected states below</option>
           </select>
         </label>
         <div class="state-picker">
           <p class="helper-text">
-            First live test: choose <code>custom</code> and select 1-2 states like <code>TX</code> or <code>CA</code>.
+            First live test: choose <code>custom</code> and pick 1–2 states like <code>TX</code> or <code>CA</code>.
           </p>
           <div class="state-grid">
             {% for state in all_states %}
               <label class="state-option">
-                <input type="checkbox" name="enabled_states" value="{{ state.code }}" />
+                <input type="checkbox" name="enabled_states" value="{{ state.code }}"{% if state.code in search_form.enabled_states %} checked{% endif %} />
                 <span>{{ state.code }}</span>
               </label>
             {% endfor %}
           </div>
         </div>
         <label>
-          <span>Max results per state query</span>
-          <input type="number" name="max_results_per_state" min="1" max="50" value="20" required />
+          <span>Target results per state query</span>
+          <input type="number" name="max_results_per_state" min="1" max="100" value="{{ search_form.max_results_per_state }}" required />
         </label>
         <label>
-          <span>Schedule minutes</span>
-          <input type="number" name="schedule_minutes" min="0" value="0" />
+          <span>Capture mode</span>
+          <select name="capture_mode">
+            <option value="standard"{% if search_form.capture_mode == 'standard' %} selected{% endif %}>Standard – lowest system usage</option>
+            <option value="balanced"{% if search_form.capture_mode == 'balanced' %} selected{% endif %}>Balanced – recommended</option>
+            <option value="deep"{% if search_form.capture_mode == 'deep' %} selected{% endif %}>Deep – highest recall</option>
+          </select>
         </label>
+        <label>
+          <span>Schedule (minutes, 0 = manual only)</span>
+          <input type="number" name="schedule_minutes" min="0" value="{{ search_form.schedule_minutes }}" />
+        </label>
+        <p class="helper-text">
+          Balanced mode runs multiple scroll passes. Deep mode opens individual post pages for full content — slower but captures truncated posts.
+        </p>
         <button class="button button-primary" type="submit">Create search</button>
       </form>
     </div>
@@ -72,11 +127,19 @@
                 <h3>{{ search.keywords }}</h3>
                 <p class="meta">
                   {{ search.state_scope_label }} ·
+                  {{ search.capture_mode_label }} capture ·
                   {{ search.total_posts }} saved posts
-                  {% if search.last_run_at %}
-                    · last run {{ search.last_run_at }}
-                  {% endif %}
+                  {% if search.last_run_at %} · last run {{ search.last_run_at }}{% endif %}
                 </p>
+                {% if search.latest_attempt %}
+                  <p class="meta">
+                    {{ search.attempt_count }} attempts ·
+                    {{ search.latest_attempt.status }} ·
+                    found {{ search.latest_attempt.found_count }}
+                  </p>
+                {% else %}
+                  <p class="meta">No search attempts yet.</p>
+                {% endif %}
               </div>
               <div class="actions">
                 <a class="button button-secondary" href="{{ request.url_for('search_detail', search_id=search.id) }}">Open</a>
@@ -93,25 +156,42 @@
     </div>
   </section>
 
+  {# ── Recent posts ────────────────────────────────────────────────── #}
   <section class="card">
-    <h2>Recently captured posts</h2>
+      <div class="lane-head" style="margin-bottom:16px;">
+        <h2>Recently captured posts</h2>
+        {% if active_resume %}
+        <span class="resume-filter-badge">🎯 Resume scored · highlight at ≥{{ (active_resume.match_threshold * 100)|int }}%</span>
+        {% endif %}
+      </div>
     {% if recent_posts %}
       <div class="posts-grid">
         {% for post in recent_posts %}
-          <a class="post-card{% if post.viewed_at %} post-card-viewed{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
-            <div class="post-card-head">
-              <p class="post-title">{{ post.author_name or 'Unknown author' }}</p>
-              {% if post.viewed_at %}
-                <span class="post-status post-status-viewed">Seen</span>
-              {% endif %}
-            </div>
-            <p class="post-snippet">{{ post.content_text[:220] }}{% if post.content_text|length > 220 %}…{% endif %}</p>
-            <p class="meta">{{ post.best_state_code or 'Unscored state' }} · {{ post.relative_time_text or 'Time unavailable' }}</p>
-          </a>
+            <a class="post-card{% if post.viewed_at %} post-card-viewed{% endif %}{% if post.resume_match_pct %} post-card-resume{% endif %}"
+               href="{{ request.url_for('post_detail', post_id=post.id) }}">
+              <div class="post-card-head">
+                <p class="post-title">{{ post.author_name or 'Unknown author' }}</p>
+                <div class="post-card-flags">
+                  {% if post.resume_match_pct %}
+                    <span class="resume-badge">🎯 {{ post.resume_match_pct }}%</span>
+                  {% endif %}
+                  {% if post.viewed_at %}
+                    <span class="post-status post-status-viewed">Seen</span>
+                  {% endif %}
+                </div>
+              </div>
+              <p class="post-snippet">{{ post.content_text[:220] }}{% if post.content_text|length > 220 %}…{% endif %}</p>
+              <p class="meta">{{ post.best_state_code or 'Unscored' }} · {{ post.relative_time_text or 'Time unavailable' }}</p>
+            </a>
         {% endfor %}
       </div>
     {% else %}
-      <p class="empty">No posts have been collected yet.</p>
+      <div class="empty-state">
+        <p>No posts have been collected yet.</p>
+        {% if not active_resume %}
+          <p class="meta">Upload your resume above, then run a search to start collecting LinkedIn posts.</p>
+        {% endif %}
+      </div>
     {% endif %}
   </section>
 {% endblock %}

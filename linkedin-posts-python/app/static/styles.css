@@ -288,6 +288,45 @@ select:focus {
   gap: 16px;
 }
 
+.results-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+}
+
+.results-column {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.results-column-latest {
+  grid-column: 1;
+}
+
+.results-column-seen {
+  grid-column: 2;
+}
+
+.lane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lane-head span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(13, 123, 103, 0.1);
+  color: var(--accent-deep);
+  font-weight: 700;
+}
+
 .state-picker {
   display: grid;
   gap: 10px;
@@ -463,6 +502,15 @@ select:focus {
     grid-template-columns: 1fr;
   }
 
+  .results-board {
+    grid-template-columns: 1fr;
+  }
+
+  .results-column-latest,
+  .results-column-seen {
+    grid-column: auto;
+  }
+
   .meta-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -502,4 +550,221 @@ select:focus {
   .state-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Resume section (compact inline)                                   */
+/* ------------------------------------------------------------------ */
+
+.resume-section {
+  padding: 18px 24px;
+}
+
+.resume-row {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.resume-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.resume-left h2 {
+  margin-bottom: 6px;
+  font-size: 1.15rem;
+}
+
+.resume-right {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Resume upload & matching                                          */
+/* ------------------------------------------------------------------ */
+
+.resume-upload-form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.resume-upload-form input[type="file"] {
+  border: 1px solid rgba(40, 54, 44, 0.16);
+  border-radius: 16px;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 0.88rem;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.resume-upload-form input[type="file"]::file-selector-button {
+  border: none;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  margin-right: 8px;
+}
+
+.resume-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.keyword-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  border: 1px solid rgba(13, 123, 103, 0.14);
+}
+
+.keyword-tag-more {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--border);
+}
+
+.keyword-tag-matched {
+  color: #1a5a1f;
+  background: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+}
+
+/* Resume match badge on post cards */
+.resume-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #fff;
+  background: linear-gradient(135deg, #0d7b67, #d6a140);
+  white-space: nowrap;
+}
+
+.resume-badge-large {
+  padding: 8px 14px;
+  font-size: 0.88rem;
+}
+
+.post-card-resume {
+  border-color: rgba(13, 123, 103, 0.22);
+  background: linear-gradient(180deg, rgba(223, 244, 239, 0.55), rgba(255, 251, 245, 0.92));
+}
+
+.post-card-resume:hover {
+  border-color: rgba(13, 123, 103, 0.36);
+  background: linear-gradient(180deg, rgba(223, 244, 239, 0.72), rgba(245, 252, 250, 0.95));
+}
+
+/* Resume match detail card on post detail page */
+.resume-match-card {
+  margin-top: 14px;
+  padding: 16px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(13, 123, 103, 0.1), rgba(214, 161, 64, 0.08));
+  border: 1px solid rgba(13, 123, 103, 0.18);
+}
+
+.resume-match-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+/* Accent button (for View Matches) */
+.button-accent {
+  color: #fff;
+  background: linear-gradient(135deg, #0d7b67, #d6a140);
+}
+
+/* Danger button (small, for Remove) */
+.button-danger-small {
+  color: var(--danger);
+  background: rgba(138, 59, 47, 0.08);
+  border: 1px solid rgba(138, 59, 47, 0.2);
+  font-size: 0.85rem;
+  padding: 8px 14px;
+}
+
+.button-danger-small:hover {
+  background: rgba(138, 59, 47, 0.15);
+}
+
+/* Resume filter pill — shown on search detail page */
+.resume-filter-pill {
+  margin-top: 14px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  font-size: 0.9rem;
+  background: linear-gradient(135deg, rgba(13, 123, 103, 0.1), rgba(214, 161, 64, 0.06));
+  border: 1px solid rgba(13, 123, 103, 0.16);
+  color: var(--accent-deep);
+}
+
+.resume-filter-pill a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.resume-filter-missing {
+  background: rgba(233, 198, 150, 0.18);
+  border-color: rgba(147, 100, 62, 0.2);
+  color: var(--warn);
+}
+
+/* Small badge beside a section heading */
+.resume-filter-badge {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #0d7b67, #d6a140);
+}
+
+/* Inline badge (e.g. threshold pill inside text) */
+.badge-inline {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--accent-deep);
+  background: var(--accent-soft);
+  border: 1px solid rgba(13, 123, 103, 0.14);
+}
+
+/* Empty state block */
+.empty-state {
+  padding: 20px 0;
+}
+
+.empty-state p {
+  margin: 0 0 6px;
+  color: var(--muted);
 }

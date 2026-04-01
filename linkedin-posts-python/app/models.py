@@ -23,6 +23,7 @@ class Search:
     keywords: str
     state_scope: str
     enabled_states: list[str]
+    capture_mode: str
     window_hours: int
     max_results_per_state: int
     schedule_minutes: int
@@ -38,6 +39,7 @@ class Search:
             keywords=row["keywords"],
             state_scope=row["state_scope"],
             enabled_states=_json_list(row["enabled_states_json"]),
+            capture_mode=row["capture_mode"] if "capture_mode" in row.keys() else "standard",
             window_hours=row["window_hours"],
             max_results_per_state=row["max_results_per_state"],
             schedule_minutes=row["schedule_minutes"],
