@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha1
 from time import sleep
 from typing import Any, Iterator
-from urllib.parse import quote_plus
+from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 from ..config import Settings, get_settings
 from ..logging_utils import get_rotating_file_logger
@@ -45,6 +45,9 @@ RESULT_SELECTORS = (
     "div.reusable-search__result-container",
     "li.search-results__list-item",
 )
+
+FILTER_RETRY_ATTEMPTS = 3
+FILTER_WAIT_MS = 900
 
 
 class LinkedInScraper:
@@ -170,11 +173,13 @@ class LinkedInScraper:
         capture_mode: str = "standard",
     ) -> SearchSessionResult:
         profile = self._capture_profile(capture_mode)
+        detail_fetch_budget = self._detail_fetch_budget(profile, max_results)
         audit: dict[str, Any] = {
             "query": query,
             "capture_mode": capture_mode,
             "query_passes_configured": profile.query_passes,
             "detail_fetch_limit": profile.detail_fetch_limit,
+            "detail_fetch_budget": detail_fetch_budget,
             "target_buffer": profile.target_buffer,
             "max_results": max_results,
             "window_hours": window_hours,
@@ -183,6 +188,7 @@ class LinkedInScraper:
             "latest_filter_active": False,
             "date_filter_clicked": False,
             "date_filter_active": False,
+            "visible_time_samples": [],
             "inline_more_clicks_total": 0,
             "detail_fetches": 0,
             "detail_page_more_clicks_total": 0,
@@ -205,7 +211,7 @@ class LinkedInScraper:
         detail_fetched_keys: set[str] = set()
         stagnant_passes = 0
         detail_fetches = 0
-        detail_page = context.new_page() if profile.detail_fetch_limit > 0 else None
+        detail_page = context.new_page() if detail_fetch_budget > 0 else None
 
         try:
             for attempt in range(profile.query_passes):
@@ -217,6 +223,7 @@ class LinkedInScraper:
                     "latest_filter_active": False,
                     "date_filter_clicked": False,
                     "date_filter_active": False,
+                    "visible_time_samples": [],
                     "cards_before_scroll": 0,
                     "cards_after_scroll": 0,
                     "inline_more_clicks": 0,
@@ -233,21 +240,22 @@ class LinkedInScraper:
                     attempt_number,
                     profile.query_passes,
                 )
-                attempt_audit["used_search_bar"] = self._open_search(page, query)
-                attempt_audit["content_page_opened"] = "/search/results/content/" in page.url
-                audit["content_page_opened"] = audit["content_page_opened"] or attempt_audit["content_page_opened"]
+                attempt_audit["used_search_bar"] = self._open_search(page, query, window_hours=window_hours)
                 self._assert_logged_in(context, page)
-                sort_audit = self._apply_sort_latest(page)
-                attempt_audit["latest_filter_clicked"] = sort_audit["clicked"]
-                attempt_audit["latest_filter_active"] = sort_audit["active"]
-                audit["latest_filter_clicked"] = audit["latest_filter_clicked"] or sort_audit["clicked"]
-                audit["latest_filter_active"] = audit["latest_filter_active"] or sort_audit["active"]
-                if window_hours <= 24:
-                    date_audit = self._apply_date_filter(page, "Past 24 hours")
-                    attempt_audit["date_filter_clicked"] = date_audit["clicked"]
-                    attempt_audit["date_filter_active"] = date_audit["active"]
-                    audit["date_filter_clicked"] = audit["date_filter_clicked"] or date_audit["clicked"]
-                    audit["date_filter_active"] = audit["date_filter_active"] or date_audit["active"]
+                filter_audit = self._ensure_manual_search_filters(page, query=query, window_hours=window_hours)
+                attempt_audit["content_page_opened"] = filter_audit["content_page_opened"]
+                attempt_audit["latest_filter_clicked"] = filter_audit["latest_filter_clicked"]
+                attempt_audit["latest_filter_active"] = filter_audit["latest_filter_active"]
+                attempt_audit["date_filter_clicked"] = filter_audit["date_filter_clicked"]
+                attempt_audit["date_filter_active"] = filter_audit["date_filter_active"]
+                attempt_audit["visible_time_samples"] = filter_audit["visible_time_samples"]
+                audit["content_page_opened"] = audit["content_page_opened"] or filter_audit["content_page_opened"]
+                audit["latest_filter_clicked"] = audit["latest_filter_clicked"] or filter_audit["latest_filter_clicked"]
+                audit["latest_filter_active"] = audit["latest_filter_active"] or filter_audit["latest_filter_active"]
+                audit["date_filter_clicked"] = audit["date_filter_clicked"] or filter_audit["date_filter_clicked"]
+                audit["date_filter_active"] = audit["date_filter_active"] or filter_audit["date_filter_active"]
+                if filter_audit["visible_time_samples"]:
+                    audit["visible_time_samples"] = filter_audit["visible_time_samples"]
                 pre_scroll_count = self._result_count(page)
                 attempt_audit["cards_before_scroll"] = pre_scroll_count
                 audit["cards_before_scroll_max"] = max(audit["cards_before_scroll_max"], pre_scroll_count)
@@ -295,7 +303,7 @@ class LinkedInScraper:
                     )
                     if (
                         detail_page is not None
-                        and detail_fetches < profile.detail_fetch_limit
+                        and detail_fetches < detail_fetch_budget
                         and key not in detail_fetched_keys
                         and self._should_fetch_post_detail(post)
                     ):
@@ -306,7 +314,7 @@ class LinkedInScraper:
                             key,
                             len((post.content_text or "").strip()),
                             detail_fetches + 1,
-                            profile.detail_fetch_limit,
+                            detail_fetch_budget,
                         )
                         detail_fetched_keys.add(key)
                         detail_fetches += 1
@@ -396,12 +404,14 @@ class LinkedInScraper:
                 target_buffer=12,
             )
         if normalized == "balanced":
-            return CaptureProfile(
-                query_passes=max(1, self.settings.balanced_query_passes),
-                detail_fetch_limit=max(0, self.settings.balanced_detail_fetch_limit),
-                target_buffer=8,
-            )
+            # Balanced mode stays on the search results page for speed.
+            return CaptureProfile(query_passes=1, detail_fetch_limit=0, target_buffer=8)
         return CaptureProfile(query_passes=1, detail_fetch_limit=0, target_buffer=0)
+
+    @staticmethod
+    def _detail_fetch_budget(profile: CaptureProfile, max_results: int) -> int:
+        del max_results
+        return max(0, profile.detail_fetch_limit)
 
     def _filter_posts_by_window(self, posts: list[ScrapedPost], *, window_hours: int) -> list[ScrapedPost]:
         if window_hours <= 0:
@@ -421,9 +431,219 @@ class LinkedInScraper:
 
     def _should_fetch_post_detail(self, post: ScrapedPost) -> bool:
         return bool(post.permalink) and (
-            len((post.content_text or "").strip()) < self.settings.detail_fetch_char_threshold
+            not post.absolute_posted_at
+            or len((post.content_text or "").strip()) < self.settings.detail_fetch_char_threshold
             or self._appears_truncated(post.content_text)
         )
+
+    @staticmethod
+    def _appears_truncated(value: str | None) -> bool:
+        normalized = " ".join((value or "").split()).lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "... more",
+                "… more",
+                "...see more",
+                "…see more",
+                " see more",
+            )
+        )
+
+    @staticmethod
+    def _normalize_space(value: Any) -> str:
+        return " ".join(str(value or "").split())
+
+    @staticmethod
+    def _label_pattern(label: str, *, exact: bool) -> re.Pattern[str]:
+        escaped = re.escape(label)
+        if exact:
+            return re.compile(rf"^{escaped}$", re.I)
+        return re.compile(escaped, re.I)
+
+    def _ensure_manual_search_filters(self, page: Any, *, query: str, window_hours: int) -> dict[str, Any]:
+        content_page_opened = "/search/results/content/" in page.url or self._open_content_results(page)
+        if not content_page_opened:
+            raise RuntimeError("LinkedIn did not open the Posts results page.")
+        self._normalize_content_results_url(page, query, window_hours=window_hours)
+
+        latest_audit = self._ensure_filter_active(
+            page,
+            active_label="Latest",
+            option_label="Latest",
+            trigger_labels=("Sort by", "Latest"),
+        )
+        if not latest_audit["active"]:
+            raise RuntimeError(
+                "LinkedIn did not confirm the Latest filter. "
+                f"Visible times: {self._sample_visible_times(page)}"
+            )
+
+        date_audit = {"clicked": False, "active": window_hours > 24}
+        if window_hours <= 24:
+            date_audit = self._ensure_filter_active(
+                page,
+                active_label="Past 24 hours",
+                option_label="Past 24 hours",
+                trigger_labels=("Date posted", "Past 24 hours", "Any time"),
+            )
+            if not date_audit["active"]:
+                raise RuntimeError(
+                    "LinkedIn did not confirm the Past 24 hours filter. "
+                    f"Visible times: {self._sample_visible_times(page)}"
+                )
+
+        return {
+            "content_page_opened": content_page_opened,
+            "latest_filter_clicked": latest_audit["clicked"],
+            "latest_filter_active": latest_audit["active"],
+            "date_filter_clicked": date_audit["clicked"],
+            "date_filter_active": date_audit["active"],
+            "visible_time_samples": self._sample_visible_times(page),
+        }
+
+    def _ensure_filter_active(
+        self,
+        page: Any,
+        *,
+        active_label: str,
+        option_label: str,
+        trigger_labels: tuple[str, ...],
+    ) -> dict[str, bool]:
+        clicked = False
+        for _ in range(FILTER_RETRY_ATTEMPTS):
+            if self._chip_is_active(page, active_label):
+                return {"clicked": clicked, "active": True}
+
+            opened = self._open_filter_menu(page, trigger_labels)
+            selected = self._select_filter_option(page, option_label)
+            clicked = clicked or opened or selected
+            self._apply_filter_panel(page)
+            page.wait_for_timeout(FILTER_WAIT_MS)
+
+            if self._chip_is_active(page, active_label):
+                return {"clicked": clicked, "active": True}
+
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            page.wait_for_timeout(150)
+
+        return {"clicked": clicked, "active": self._chip_is_active(page, active_label)}
+
+    def _open_filter_menu(self, page: Any, labels: tuple[str, ...]) -> bool:
+        for label in labels:
+            if self._click_labeled_control(page, label, exact=False):
+                page.wait_for_timeout(250)
+                return True
+        return False
+
+    def _select_filter_option(self, page: Any, label: str) -> bool:
+        return self._check_labeled_option(page, label) or self._click_labeled_control(page, label, exact=True)
+
+    def _apply_filter_panel(self, page: Any) -> bool:
+        for label in ("Apply", "Show results", "Done"):
+            if self._click_labeled_control(page, label, exact=False):
+                page.wait_for_timeout(250)
+                return True
+        return False
+
+    def _check_labeled_option(self, page: Any, label: str) -> bool:
+        try:
+            page.get_by_label(self._label_pattern(label, exact=True)).first.check(timeout=1500)
+            return True
+        except Exception:
+            return False
+
+    def _click_labeled_control(self, page: Any, label: str, *, exact: bool) -> bool:
+        pattern = self._label_pattern(label, exact=exact)
+        locators = [
+            page.get_by_role("button", name=pattern),
+            page.get_by_role("link", name=pattern),
+            page.get_by_role("option", name=pattern),
+            page.get_by_role("menuitemradio", name=pattern),
+            page.get_by_role("menuitemcheckbox", name=pattern),
+            page.get_by_text(pattern),
+        ]
+        for locator in locators:
+            if self._safe_click(locator):
+                return True
+        return self._click_text_control_js(page, label, exact=exact)
+
+    def _safe_click(self, locator: Any) -> bool:
+        try:
+            target = locator.first
+            target.scroll_into_view_if_needed(timeout=750)
+            target.click(timeout=1500)
+            return True
+        except Exception:
+            try:
+                locator.first.evaluate("(node) => node.click()")
+                return True
+            except Exception:
+                return False
+
+    def _click_text_control_js(self, page: Any, label: str, *, exact: bool) -> bool:
+        try:
+            return bool(
+                page.evaluate(
+                    """
+                    ({ label, exact }) => {
+                      const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim().toLowerCase();
+                      const target = normalize(label);
+                      const isVisible = (element) => {
+                        if (!element) return false;
+                        const style = window.getComputedStyle(element);
+                        const rect = element.getBoundingClientRect();
+                        return style.visibility !== "hidden" &&
+                          style.display !== "none" &&
+                          rect.width > 0 &&
+                          rect.height > 0;
+                      };
+                      const matches = (value) => {
+                        const normalized = normalize(value);
+                        return exact ? normalized === target : normalized.includes(target);
+                      };
+                      const candidates = Array.from(
+                        document.querySelectorAll("button, a, label, div[role='button'], span[role='button'], li, span")
+                      );
+                      for (const element of candidates) {
+                        if (!isVisible(element)) continue;
+                        const ariaLabel = element.getAttribute ? element.getAttribute("aria-label") : "";
+                        const text = element.innerText || element.textContent || "";
+                        if (!matches(text) && !matches(ariaLabel)) continue;
+                        try {
+                          element.click();
+                          return true;
+                        } catch (error) {
+                          continue;
+                        }
+                      }
+                      return false;
+                    }
+                    """,
+                    {"label": label, "exact": exact},
+                )
+            )
+        except Exception:
+            return False
+
+    def _sample_visible_times(self, page: Any, *, limit: int = 6) -> list[str]:
+        samples: list[str] = []
+        pattern = re.compile(
+            r"\b(?:\d+\s*(?:m|h|d|w|mo|y)|\d+\s+(?:minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|yesterday)\b",
+            re.I,
+        )
+        for card in self._result_cards(page)[:limit]:
+            try:
+                text = " ".join(card.inner_text(timeout=300).split())
+            except Exception:
+                continue
+            match = pattern.search(text)
+            if match:
+                samples.append(match.group(0))
+        return samples
 
     @staticmethod
     def _appears_truncated(value: str | None) -> bool:
@@ -449,22 +669,18 @@ class LinkedInScraper:
             ) from exc
         return sync_playwright
 
-    def _open_search(self, page: Any, query: str) -> bool:
+    def _open_search(self, page: Any, query: str, *, window_hours: int) -> bool:
         self.logger.debug("open_search_start query=%r current_url=%s", query, getattr(page, "url", ""))
-        if self._open_search_from_search_bar(page, query):
+        if self._open_search_from_search_bar(page, query, window_hours=window_hours):
             self.logger.debug("open_search_via_search_bar_success query=%r final_url=%s", query, page.url)
             return True
 
-        encoded_query = quote_plus(query)
-        page.goto(
-            f"https://www.linkedin.com/search/results/content/?keywords={encoded_query}",
-            wait_until="domcontentloaded",
-        )
+        page.goto(self._build_content_results_url(query, window_hours=window_hours), wait_until="domcontentloaded")
         page.wait_for_timeout(1500)
         self.logger.debug("open_search_direct_url query=%r final_url=%s", query, page.url)
         return False
 
-    def _open_search_from_search_bar(self, page: Any, query: str) -> bool:
+    def _open_search_from_search_bar(self, page: Any, query: str, *, window_hours: int) -> bool:
         try:
             page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded")
             page.wait_for_timeout(1500)
@@ -481,7 +697,7 @@ class LinkedInScraper:
             self.logger.debug("search_bar_submit query=%r intermediate_url=%s", query, page.url)
 
             if self._open_content_results(page):
-                self._normalize_content_results_url(page, query)
+                self._normalize_content_results_url(page, query, window_hours=window_hours)
                 return True
         except Exception as exc:
             self.logger.warning(
@@ -498,9 +714,14 @@ class LinkedInScraper:
             return True
 
         selectors = [
-            ("href_link", lambda: page.locator("a[href*='/search/results/content/']").first.click(timeout=3000)),
-            ("role_link", lambda: page.get_by_role("link", name=re.compile(r"^(Posts|Content)$", re.I)).click(timeout=3000)),
-            ("text_link", lambda: page.get_by_text(re.compile(r"^(Posts|Content)$", re.I)).click(timeout=3000)),
+            ("role_link", lambda: page.get_by_role("link", name=re.compile(r"^(Posts|Content)$", re.I)).first.click(timeout=3000)),
+            ("text_link", lambda: page.get_by_text(re.compile(r"^(Posts|Content)$", re.I)).first.click(timeout=3000)),
+            (
+                "href_link",
+                lambda: page.locator("a[href*='/search/results/content/']:not([href*='postedBy='])").first.click(
+                    timeout=3000
+                ),
+            ),
         ]
         for label, action in selectors:
             try:
@@ -516,9 +737,22 @@ class LinkedInScraper:
         self.logger.warning("open_content_results_failed final_url=%s", page.url)
         return False
 
-    def _normalize_content_results_url(self, page: Any, query: str) -> None:
-        encoded_query = quote_plus(query)
-        clean_url = f"https://www.linkedin.com/search/results/content/?keywords={encoded_query}"
+    def _build_content_results_url(self, query: str, *, window_hours: int) -> str:
+        params: list[tuple[str, str]] = [
+            ("keywords", self._normalize_space(query)),
+            ("sortBy", '"date_posted"'),
+            ("origin", "FACETED_SEARCH"),
+        ]
+        if window_hours <= 24:
+            params.append(("datePosted", '"past-24h"'))
+        return f"https://www.linkedin.com/search/results/content/?{urlencode(params)}"
+
+    def _sanitize_content_results_url(self, url: str, *, query: str, window_hours: int) -> str:
+        del url
+        return self._build_content_results_url(query, window_hours=window_hours)
+
+    def _normalize_content_results_url(self, page: Any, query: str, *, window_hours: int) -> None:
+        clean_url = self._sanitize_content_results_url(page.url, query=query, window_hours=window_hours)
         if page.url == clean_url:
             self.logger.debug("normalize_content_results_url_skipped query=%r url=%s", query, page.url)
             return
@@ -602,6 +836,12 @@ class LinkedInScraper:
                     (targetLabel) => {
                       const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim().toLowerCase();
                       const target = normalize(targetLabel);
+                      const matches = (value) => {
+                        const normalized = normalize(value);
+                        return normalized === target ||
+                          normalized.startsWith(target + " ") ||
+                          normalized.endsWith(" " + target);
+                      };
                       const candidates = Array.from(
                         document.querySelectorAll('button, a, div[role="button"], span[role="button"], li, span')
                       );
@@ -627,7 +867,7 @@ class LinkedInScraper:
                             className.includes('active');
                         });
                       };
-                      return candidates.some((element) => normalize(element.innerText || element.textContent) === target && isActive(element));
+                      return candidates.some((element) => matches(element.innerText || element.textContent) && isActive(element));
                     }
                     """,
                     label,
@@ -776,35 +1016,62 @@ class LinkedInScraper:
                 payload = card.evaluate(
                     """
                     (node) => {
+                      const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+                      const unique = (values) => {
+                        const ordered = [];
+                        const seen = new Set();
+                        for (const value of values) {
+                          const normalized = normalize(value);
+                          if (!normalized) continue;
+                          const key = normalized.toLowerCase();
+                          if (seen.has(key)) continue;
+                          seen.add(key);
+                          ordered.push(normalized);
+                        }
+                        return ordered;
+                      };
                       const textFrom = (selectors) => {
                         for (const selector of selectors) {
                           const element = node.querySelector(selector);
                           if (element && element.innerText && element.innerText.trim()) {
-                            return element.innerText.trim();
+                            return normalize(element.innerText);
                           }
                         }
                         return "";
                       };
+                      const textsFrom = (selectors) => {
+                        const collected = [];
+                        for (const selector of selectors) {
+                          for (const element of Array.from(node.querySelectorAll(selector))) {
+                            if (element && element.innerText && element.innerText.trim()) {
+                              collected.push(element.innerText);
+                            }
+                          }
+                        }
+                        return unique(collected);
+                      };
 
-                      const linkSelectors = [
-                        'a[href*="/feed/update/"]',
-                        'a[href*="/posts/"]',
-                        'a[href*="/activity/"]'
-                      ];
-                      let permalink = "";
-                      for (const selector of linkSelectors) {
-                        const link = node.querySelector(selector);
-                        if (link && link.href) {
-                          permalink = link.href;
-                          break;
+                      const permalinkCandidates = [];
+                      for (const link of Array.from(node.querySelectorAll('a[href]'))) {
+                        const href = link.href || link.getAttribute('href') || "";
+                        if (!href) continue;
+                        if (
+                          href.includes('/feed/update/') ||
+                          href.includes('/posts/') ||
+                          href.includes('/activity/')
+                        ) {
+                          permalinkCandidates.push(href);
                         }
                       }
-                      if (!permalink) {
-                        const urn = node.getAttribute('data-urn');
-                        if (urn) {
-                          permalink = `https://www.linkedin.com/feed/update/${urn}/`;
-                        }
-                      }
+
+                      const urnCandidates = unique([
+                        node.getAttribute('data-urn'),
+                        node.getAttribute('data-id'),
+                        ...Array.from(node.querySelectorAll('[data-urn], [data-id]')).flatMap((element) => [
+                          element.getAttribute('data-urn'),
+                          element.getAttribute('data-id'),
+                        ]),
+                      ]);
 
                       const authorSelectors = [
                         '.update-components-actor__name span[dir="ltr"]',
@@ -826,21 +1093,29 @@ class LinkedInScraper:
                         }
                       }
 
+                      const timeElement = node.querySelector('time');
+
                       return {
-                        permalink,
+                        permalink_candidates: unique(permalinkCandidates),
+                        urn_candidates: urnCandidates,
                         author_name: textFrom(authorSelectors),
                         author_profile_url: authorProfileUrl,
-                        content_text: textFrom([
+                        content_candidates: textsFrom([
+                          '.update-components-update-v2__commentary',
+                          '.feed-shared-inline-show-more-text',
                           '.update-components-text',
                           '.feed-shared-update-v2__description',
                           '.entity-result__summary',
-                          'div[dir="ltr"]'
+                          '.feed-shared-text-view',
+                          '.attributed-text-segment-list__content',
+                          '.break-words'
                         ]),
-                        full_text: node.innerText ? node.innerText.trim() : "",
-                        relative_time_text: textFrom([
+                        full_text: node.innerText ? normalize(node.innerText) : "",
+                        relative_time_text: (timeElement && timeElement.innerText) ? normalize(timeElement.innerText) : textFrom([
                           '.update-components-actor__sub-description',
                           '.entity-result__secondary-subtitle'
                         ]),
+                        absolute_posted_at: timeElement ? timeElement.getAttribute('datetime') || "" : "",
                       };
                     }
                     """
@@ -848,14 +1123,17 @@ class LinkedInScraper:
             except Exception:
                 continue
 
-            content_text = " ".join((payload.get("content_text") or "").split())
-            full_text = " ".join((payload.get("full_text") or "").split())
-            if len(full_text) > len(content_text):
-                content_text = full_text
             author_name = self._clean_author_name(payload.get("author_name"))
-            permalink = payload.get("permalink") or None
-            author_profile_url = payload.get("author_profile_url") or None
-            relative_time_text = payload.get("relative_time_text") or None
+            permalink = self._select_post_permalink(payload)
+            author_profile_url = self._normalize_linkedin_permalink(payload.get("author_profile_url"))
+            relative_time_text = self._normalize_space(payload.get("relative_time_text")) or None
+            absolute_posted_at = self._normalize_space(payload.get("absolute_posted_at")) or None
+            content_text = self._select_content_text(
+                content_candidates=payload.get("content_candidates"),
+                full_text=payload.get("full_text"),
+                author_name=author_name or None,
+                relative_time_text=relative_time_text,
+            )
 
             if not content_text and not permalink:
                 self.logger.debug("extract_posts_skip_empty_card index=%s", index)
@@ -869,6 +1147,7 @@ class LinkedInScraper:
                 author_profile_url=author_profile_url,
                 content_text=content_text,
                 relative_time_text=relative_time_text,
+                absolute_posted_at=absolute_posted_at,
             )
             posts.append(post)
             self.logger.debug(
@@ -981,14 +1260,39 @@ class LinkedInScraper:
             payload = page.evaluate(
                 """
                 () => {
+                  const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+                  const unique = (values) => {
+                    const ordered = [];
+                    const seen = new Set();
+                    for (const value of values) {
+                      const normalized = normalize(value);
+                      if (!normalized) continue;
+                      const key = normalized.toLowerCase();
+                      if (seen.has(key)) continue;
+                      seen.add(key);
+                      ordered.push(normalized);
+                    }
+                    return ordered;
+                  };
                   const textFrom = (selectors) => {
                     for (const selector of selectors) {
                       const element = document.querySelector(selector);
                       if (element && element.innerText && element.innerText.trim()) {
-                        return element.innerText.trim();
+                        return normalize(element.innerText);
                       }
                     }
                     return "";
+                  };
+                  const textsFrom = (selectors) => {
+                    const collected = [];
+                    for (const selector of selectors) {
+                      for (const element of Array.from(document.querySelectorAll(selector))) {
+                        if (element && element.innerText && element.innerText.trim()) {
+                          collected.push(element.innerText);
+                        }
+                      }
+                    }
+                    return unique(collected);
                   };
 
                   const firstHref = (selectors) => {
@@ -1013,13 +1317,19 @@ class LinkedInScraper:
                       'a[href*="/in/"]',
                       'a[href*="/company/"]'
                     ]),
-                    content_text: textFrom([
+                    content_candidates: textsFrom([
+                      '.update-components-update-v2__commentary',
+                      '.feed-shared-inline-show-more-text',
                       '.update-components-text',
                       '.feed-shared-update-v2__description',
                       '.break-words',
+                      '.attributed-text-segment-list__content',
                       'main div[dir="ltr"]'
                     ]),
-                    relative_time_text: textFrom([
+                    full_text: document.querySelector('main') && document.querySelector('main').innerText
+                      ? normalize(document.querySelector('main').innerText)
+                      : normalize(document.body && document.body.innerText),
+                    relative_time_text: (timeElement && timeElement.innerText) ? normalize(timeElement.innerText) : textFrom([
                       '.update-components-actor__sub-description',
                       '.feed-shared-actor__sub-description'
                     ]),
@@ -1032,16 +1342,23 @@ class LinkedInScraper:
             self.logger.warning("fetch_post_detail_failed permalink=%s error=%s", post.permalink, exc)
             return None, 0
 
-        content_text = " ".join((payload.get("content_text") or "").split())
+        content_text = self._select_content_text(
+            content_candidates=payload.get("content_candidates"),
+            full_text=payload.get("full_text"),
+            author_name=post.author_name,
+            relative_time_text=payload.get("relative_time_text") or post.relative_time_text,
+        )
         if not content_text:
             self.logger.debug("fetch_post_detail_empty_content permalink=%s", post.permalink)
             return None, detail_more_clicks
 
         author_name = self._clean_author_name(payload.get("author_name")) or post.author_name
-        permalink = payload.get("permalink") or post.permalink
-        author_profile_url = payload.get("author_profile_url") or post.author_profile_url
-        relative_time_text = payload.get("relative_time_text") or post.relative_time_text
-        absolute_posted_at = payload.get("absolute_posted_at") or post.absolute_posted_at
+        permalink = self._normalize_linkedin_permalink(payload.get("permalink")) or post.permalink
+        author_profile_url = (
+            self._normalize_linkedin_permalink(payload.get("author_profile_url")) or post.author_profile_url
+        )
+        relative_time_text = self._normalize_space(payload.get("relative_time_text")) or post.relative_time_text
+        absolute_posted_at = self._normalize_space(payload.get("absolute_posted_at")) or post.absolute_posted_at
 
         detail_post = ScrapedPost(
             external_id=self._build_external_id(permalink, author_name, content_text),
@@ -1063,25 +1380,45 @@ class LinkedInScraper:
 
     def _expand_page_see_more(self, page: Any) -> int:
         try:
-            controls = page.locator("button, a[role='button'], span[role='button']")
             expanded_count = 0
-            for index in range(controls.count()):
-                control = controls.nth(index)
-                try:
-                    label = " ".join(control.inner_text(timeout=400).split()).lower()
-                except Exception:
-                    continue
-                if "see more" not in label:
-                    continue
-                try:
-                    control.click(timeout=400)
-                    expanded_count += 1
-                except Exception:
-                    try:
-                        control.evaluate("(node) => node.click()")
-                        expanded_count += 1
-                    except Exception:
-                        continue
+            for _ in range(3):
+                expanded = int(
+                    page.evaluate(
+                        """
+                        () => {
+                          let count = 0;
+                          const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                          const controls = document.querySelectorAll(
+                            'button, a[role="button"], [role="button"], span.feed-shared-inline-show-more-text'
+                          );
+                          for (const control of controls) {
+                            const text = normalize(control.innerText || control.textContent);
+                            if (
+                              text === 'see more' ||
+                              text === '…see more' ||
+                              text === '...see more' ||
+                              text === '…more' ||
+                              text === '...more' ||
+                              text.endsWith(' see more') ||
+                              text.endsWith('... more') ||
+                              text.endsWith('… more')
+                            ) {
+                              try {
+                                control.click();
+                                count += 1;
+                              } catch (error) {
+                              }
+                            }
+                          }
+                          return count;
+                        }
+                        """
+                    )
+                )
+                expanded_count += expanded
+                if expanded <= 0:
+                    break
+                page.wait_for_timeout(400)
             self.logger.debug("expand_page_see_more_complete url=%s expanded=%s", page.url, expanded_count)
             return expanded_count
         except Exception:
@@ -1116,6 +1453,122 @@ class LinkedInScraper:
             relative_time_text=relative_time_text,
             absolute_posted_at=absolute_posted_at,
         )
+
+    def _select_post_permalink(self, payload: dict[str, Any]) -> str | None:
+        for raw in payload.get("permalink_candidates") or []:
+            normalized = self._normalize_linkedin_permalink(raw)
+            if normalized and self._looks_like_post_permalink(normalized):
+                return normalized
+        for raw in payload.get("urn_candidates") or []:
+            permalink = self._build_feed_update_permalink(raw)
+            if permalink:
+                return permalink
+        return None
+
+    def _select_content_text(
+        self,
+        *,
+        content_candidates: list[Any] | None,
+        full_text: str | None,
+        author_name: str | None,
+        relative_time_text: str | None,
+    ) -> str:
+        cleaned_candidates: list[str] = []
+        seen: set[str] = set()
+        for raw in content_candidates or []:
+            text = self._normalize_space(raw)
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned_candidates.append(text)
+
+        best_candidate = max(cleaned_candidates, key=len, default="")
+        fallback_text = self._fallback_card_text(
+            full_text,
+            author_name=author_name,
+            relative_time_text=relative_time_text,
+        )
+        if fallback_text and (
+            not best_candidate
+            or self._appears_truncated(best_candidate)
+            or len(fallback_text) > (len(best_candidate) + 80)
+        ):
+            return fallback_text
+        return best_candidate or fallback_text
+
+    def _fallback_card_text(
+        self,
+        full_text: str | None,
+        *,
+        author_name: str | None,
+        relative_time_text: str | None,
+    ) -> str:
+        ignored_exact = {
+            "like",
+            "comment",
+            "repost",
+            "send",
+            "follow",
+            "message",
+            "promoted",
+        }
+        ignored_pattern = re.compile(
+            r"^(?:\d+\s+)?(?:comment|comments|repost|reposts|like|likes|reaction|reactions)$",
+            re.I,
+        )
+        author_key = self._normalize_space(author_name).casefold()
+        relative_key = self._normalize_space(relative_time_text).casefold()
+        lines = [self._normalize_space(line) for line in str(full_text or "").splitlines()]
+        cleaned_lines: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            if not line:
+                continue
+            lowered = line.casefold()
+            if lowered in ignored_exact or ignored_pattern.match(line):
+                continue
+            if author_key and lowered == author_key:
+                continue
+            if relative_key and lowered == relative_key:
+                continue
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            cleaned_lines.append(line)
+        return " ".join(cleaned_lines)
+
+    @staticmethod
+    def _build_feed_update_permalink(value: Any) -> str | None:
+        normalized = LinkedInScraper._normalize_space(value)
+        if not normalized:
+            return None
+        urn_match = re.search(r"(urn:li:(?:activity|ugcPost):[A-Za-z0-9_-]+)", normalized)
+        if not urn_match:
+            return None
+        return f"https://www.linkedin.com/feed/update/{urn_match.group(1)}/"
+
+    @staticmethod
+    def _looks_like_post_permalink(value: str) -> bool:
+        lowered = value.lower()
+        return any(part in lowered for part in ("/feed/update/", "/posts/", "/activity/"))
+
+    @staticmethod
+    def _normalize_linkedin_permalink(value: Any) -> str | None:
+        normalized = LinkedInScraper._normalize_space(value)
+        if not normalized:
+            return None
+        absolute = urljoin("https://www.linkedin.com", normalized)
+        parsed = urlsplit(absolute)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        path = parsed.path or "/"
+        clean_path = path.rstrip("/") or "/"
+        if clean_path != "/":
+            clean_path = f"{clean_path}/"
+        return urlunsplit((parsed.scheme, parsed.netloc, clean_path, "", ""))
 
     def _build_external_id(self, permalink: str | None, author_name: str | None, content_text: str) -> str:
         if permalink:
