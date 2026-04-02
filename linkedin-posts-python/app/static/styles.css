@@ -431,6 +431,29 @@ select:focus {
   line-height: 1.55;
 }
 
+.post-card-brief {
+  display: grid;
+  gap: 8px;
+  margin: 2px 0 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(13, 123, 103, 0.08);
+  border: 1px solid rgba(13, 123, 103, 0.12);
+}
+
+.post-card-brief p {
+  margin: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.post-card-brief strong {
+  color: var(--accent-deep);
+  font-size: 0.76rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .split-head,
 .state-head,
 .inline-meta {
@@ -484,6 +507,35 @@ select:focus {
   padding: 18px;
   border-radius: 18px;
   border: 1px solid rgba(40, 54, 44, 0.12);
+}
+
+.content-block-formatted {
+  white-space: pre-line;
+  font-size: 1.02rem;
+  line-height: 1.75;
+}
+
+.post-brief {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(223, 244, 239, 0.7), rgba(255, 255, 255, 0.72));
+  border: 1px solid rgba(13, 123, 103, 0.14);
+}
+
+.post-brief p {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.post-brief strong {
+  color: var(--accent-deep);
+  font-size: 0.84rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .text-link {

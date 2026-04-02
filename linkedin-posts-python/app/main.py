@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
+import re
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request, UploadFile, File
@@ -105,6 +106,60 @@ def _normalize_display_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+DISPLAY_HIGHLIGHT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "display_role": ("Hiring:", "Role:", "Job Title:", "Position:"),
+    "display_location": ("Location:",),
+    "display_duration": ("Duration:", "Type:", "Employment Type:"),
+}
+
+DISPLAY_SECTION_LABELS = (
+    "Role:",
+    "Hiring:",
+    "Job Title:",
+    "Position:",
+    "Location:",
+    "Duration:",
+    "Job Description:",
+    "Key Responsibilities:",
+    "Responsibilities:",
+    "Required Skills:",
+    "Required Qualifications:",
+    "Preferred Skills:",
+    "Nice to Have:",
+    "What We're Looking For:",
+    "What We’re Looking For:",
+    "Must have:",
+    "Must Have:",
+    "Plus:",
+    "Role Overview:",
+    "Job Overview:",
+    "Role Summary",
+    "Summary:",
+    "Core Skills Required:",
+    "Key Highlights:",
+    "Email:",
+)
+
+DISPLAY_BULLET_MARKERS = (
+    "•",
+    "✔",
+    "🔹",
+    "📍",
+    "📅",
+    "💡",
+    "🛠️",
+    "✨",
+    "🚀",
+    "📄",
+    "⏳",
+    "🏦",
+    "📝",
+    "🔑",
+    "⭐",
+    "🎯",
+)
+
+
 def _extract_group_post_title(content_text: str | None, author_name: str | None) -> str | None:
     content = _normalize_display_text(content_text)
     author = _normalize_display_text(author_name)
@@ -123,12 +178,92 @@ def _extract_group_post_title(content_text: str | None, author_name: str | None)
     return title or None
 
 
+def _strip_post_display_scaffolding(content_text: str | None) -> str:
+    content = _normalize_display_text(content_text)
+    if not content:
+        return ""
+    if content.lower().startswith("feed post "):
+        content = content[len("Feed post ") :].strip()
+    if " Follow " in content:
+        trailing = content.split(" Follow ", 1)[1].strip()
+        if trailing:
+            content = trailing
+    for marker in (
+        " Only group members can comment on this post.",
+        " Activate to view larger image",
+        " See content credentials",
+        " Like Comment Repost Send",
+        " Like Comment",
+    ):
+        index = content.find(marker)
+        if index > 0:
+            content = content[:index].strip()
+    return content.strip()
+
+
+def _format_post_display_text(content_text: str | None) -> str:
+    formatted = _strip_post_display_scaffolding(content_text)
+    if not formatted:
+        return ""
+    section_pattern = "|".join(
+        re.escape(label) for label in sorted(DISPLAY_SECTION_LABELS, key=len, reverse=True)
+    )
+    formatted = re.sub(rf"\s+({section_pattern})", r"\n\n\1", formatted)
+    for marker in DISPLAY_BULLET_MARKERS:
+        formatted = formatted.replace(f" {marker} ", f"\n{marker} ")
+    formatted = re.sub(r"\s+(?=hashtag\s+#)", "\n", formatted, flags=re.I)
+    formatted = re.sub(r"\n{3,}", "\n\n", formatted)
+    return formatted.strip()
+
+
+def _extract_display_highlights(formatted_text: str) -> dict[str, str | None]:
+    highlights: dict[str, str | None] = {key: None for key in DISPLAY_HIGHLIGHT_PREFIXES}
+    for line in [segment.strip() for segment in formatted_text.splitlines() if segment.strip()]:
+        normalized = _normalize_display_text(line)
+        for key, prefixes in DISPLAY_HIGHLIGHT_PREFIXES.items():
+            if highlights[key]:
+                continue
+            for prefix in prefixes:
+                if normalized.lower().startswith(prefix.lower()):
+                    highlights[key] = normalized[len(prefix) :].strip(" -")
+                    break
+    return highlights
+
+
+def _remove_highlight_lines(formatted_text: str, highlights: dict[str, str | None]) -> str:
+    removable_lines = {
+        _normalize_display_text(f"{prefix} {value}")
+        for key, value in highlights.items()
+        if value
+        for prefix in DISPLAY_HIGHLIGHT_PREFIXES.get(key, ())
+    }
+    kept_lines: list[str] = []
+    for raw_line in formatted_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            kept_lines.append("")
+            continue
+        normalized = _normalize_display_text(line)
+        if normalized in removable_lines:
+            continue
+        kept_lines.append(line)
+    body = "\n".join(kept_lines)
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    return body.strip()
+
+
 def _annotate_post_for_display(post: dict[str, Any]) -> dict[str, Any]:
     author_name = _normalize_display_text(post.get("author_name")) or None
     display_title = _extract_group_post_title(post.get("content_text"), author_name)
+    formatted_text = _format_post_display_text(post.get("content_text"))
+    highlights = _extract_display_highlights(formatted_text)
+    display_body = _remove_highlight_lines(formatted_text, highlights) or formatted_text
     post["display_author_name"] = author_name or "Unknown author"
     post["display_title"] = display_title or post["display_author_name"]
     post["display_has_group_title"] = bool(display_title and display_title != author_name)
+    post["display_body"] = display_body
+    post["display_excerpt"] = _normalize_display_text(display_body or formatted_text or post.get("content_text"))
+    post.update(highlights)
     return post
 
 

@@ -42,7 +42,20 @@
   <section class="grid">
     <div class="card">
       <h2>Post content</h2>
-      <pre class="content-block">{{ post.content_text }}</pre>
+      {% if post.display_role or post.display_location or post.display_duration %}
+        <div class="post-brief">
+          {% if post.display_role %}
+            <p><strong>Role</strong><span>{{ post.display_role }}</span></p>
+          {% endif %}
+          {% if post.display_location %}
+            <p><strong>Location</strong><span>{{ post.display_location }}</span></p>
+          {% endif %}
+          {% if post.display_duration %}
+            <p><strong>Duration</strong><span>{{ post.display_duration }}</span></p>
+          {% endif %}
+        </div>
+      {% endif %}
+      <div class="content-block content-block-formatted">{{ post.display_body or post.content_text }}</div>
     </div>
 
     <div class="card">

@@ -50,7 +50,20 @@
                 {% endif %}
               </div>
             </div>
-            <p class="post-snippet">{{ post.content_text[:300] }}{% if post.content_text|length > 300 %}…{% endif %}</p>
+            {% if post.display_role or post.display_location or post.display_duration %}
+              <div class="post-card-brief">
+                {% if post.display_role %}
+                  <p><strong>Role</strong><span>{{ post.display_role }}</span></p>
+                {% endif %}
+                {% if post.display_location %}
+                  <p><strong>Location</strong><span>{{ post.display_location }}</span></p>
+                {% endif %}
+                {% if post.display_duration %}
+                  <p><strong>Duration</strong><span>{{ post.display_duration }}</span></p>
+                {% endif %}
+              </div>
+            {% endif %}
+            <p class="post-snippet">{{ post.display_excerpt[:300] }}{% if post.display_excerpt|length > 300 %}…{% endif %}</p>
             <p class="meta">{{ post.best_state_code or 'Unscored state' }} · {{ post.relative_time_text or 'Time unavailable' }}</p>
           </a>
         {% endfor %}
