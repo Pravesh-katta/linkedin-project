@@ -6,7 +6,15 @@ from typing import Any
 from .. import db
 from ..config import Settings, get_settings
 from ..logging_utils import get_rotating_file_logger
-from ..scoring import dedupe_fingerprint, keyword_focus_terms, keyword_match_score, overall_result_score, state_match_score
+from ..role_matching import analyze_post_for_query
+from ..scoring import (
+    dedupe_fingerprint,
+    extract_state_match_scores,
+    keyword_focus_terms,
+    keyword_match_score,
+    overall_result_score,
+    state_match_score,
+)
 from ..state_catalog import build_state_query_variants, resolve_enabled_states
 from .linkedin_scraper import LinkedInScraper
 
@@ -66,6 +74,7 @@ class SearchRunner:
                         "stored_posts": 0,
                         "duplicates_skipped": 0,
                         "skipped_missing_core_terms": 0,
+                        "skipped_hidden_from_frontend": 0,
                     }
                     self.logger.info(
                         "query_run_start search_id=%s run_id=%s state=%s query=%r",
@@ -92,6 +101,7 @@ class SearchRunner:
                         run_audit.setdefault("stored_posts", 0)
                         run_audit.setdefault("duplicates_skipped", 0)
                         run_audit.setdefault("skipped_missing_core_terms", 0)
+                        run_audit.setdefault("skipped_hidden_from_frontend", 0)
 
                         self.logger.info(
                             "query_run_scraped search_id=%s run_id=%s state=%s query=%r scraped_posts=%s",
@@ -146,6 +156,8 @@ class SearchRunner:
                             score = overall_result_score(scraped_post.content_text, search["keywords"], state)
                             if score <= 0:
                                 score = max(0.01, keyword_score)
+                            role_analysis = analyze_post_for_query(scraped_post.content_text, search["keywords"])
+                            score = round(max(score, float(role_analysis.relevance_score or 0.0)), 4)
 
                             post_id = db.upsert_post(
                                 external_id=scraped_post.external_id,
@@ -160,20 +172,46 @@ class SearchRunner:
                                 source_query=query_variant,
                                 settings=self.settings,
                             )
+                            db.replace_post_state_matches(
+                                post_id,
+                                extract_state_match_scores(scraped_post.content_text),
+                                settings=self.settings,
+                            )
+                            seen_state_fingerprints.add(state_fingerprint)
+                            if role_analysis.hidden_from_frontend:
+                                run_audit["skipped_hidden_from_frontend"] += 1
+                                self.logger.info(
+                                    "post_saved_hidden search_id=%s run_id=%s state=%s query=%r post_id=%s reason=%s match_type=%s permalink=%s author=%r preview=%r",
+                                    search_id,
+                                    run_id,
+                                    state.code,
+                                    query_variant,
+                                    post_id,
+                                    role_analysis.hidden_reason,
+                                    role_analysis.match_type,
+                                    scraped_post.permalink,
+                                    scraped_post.author_name,
+                                    self._preview_text(scraped_post.content_text),
+                                )
+                                continue
+
                             inserted = db.link_search_result(
                                 search_id,
                                 run_id,
                                 post_id,
                                 state.code,
                                 score,
-                                self.settings,
+                                matched_opening_text=role_analysis.matched_opening,
+                                match_type=role_analysis.match_type,
+                                role_family=role_analysis.role_family,
+                                relevance_score=role_analysis.relevance_score,
+                                settings=self.settings,
                             )
-                            seen_state_fingerprints.add(state_fingerprint)
                             if inserted:
                                 found_count += 1
                                 run_audit["stored_posts"] += 1
                             self.logger.info(
-                                "post_saved search_id=%s run_id=%s state=%s query=%r post_id=%s score=%s state_confidence=%s permalink=%s author=%r preview=%r",
+                                "post_saved search_id=%s run_id=%s state=%s query=%r post_id=%s score=%s state_confidence=%s match_type=%s matched_opening=%r role_family=%s permalink=%s author=%r preview=%r",
                                 search_id,
                                 run_id,
                                 state.code,
@@ -181,6 +219,9 @@ class SearchRunner:
                                 post_id,
                                 score,
                                 state_confidence,
+                                role_analysis.match_type,
+                                role_analysis.matched_opening,
+                                role_analysis.role_family,
                                 scraped_post.permalink,
                                 scraped_post.author_name,
                                 self._preview_text(scraped_post.content_text),

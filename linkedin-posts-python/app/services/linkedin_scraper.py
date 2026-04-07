@@ -173,11 +173,13 @@ class LinkedInScraper:
         capture_mode: str = "standard",
     ) -> SearchSessionResult:
         profile = self._capture_profile(capture_mode)
+        collection_target = self._collection_target(profile, max_results)
         detail_fetch_budget = self._detail_fetch_budget(profile, max_results)
         audit: dict[str, Any] = {
             "query": query,
             "capture_mode": capture_mode,
             "query_passes_configured": profile.query_passes,
+            "collection_target": collection_target,
             "detail_fetch_limit": profile.detail_fetch_limit,
             "detail_fetch_budget": detail_fetch_budget,
             "target_buffer": profile.target_buffer,
@@ -266,7 +268,7 @@ class LinkedInScraper:
                     page.url,
                     pre_scroll_count,
                 )
-                self._scroll_results(page, window_hours=window_hours)
+                self._scroll_results(page, window_hours=window_hours, target_results=collection_target)
                 post_scroll_count = self._result_count(page)
                 attempt_audit["cards_after_scroll"] = post_scroll_count
                 audit["cards_after_scroll_max"] = max(audit["cards_after_scroll_max"], post_scroll_count)
@@ -412,6 +414,11 @@ class LinkedInScraper:
     def _detail_fetch_budget(profile: CaptureProfile, max_results: int) -> int:
         del max_results
         return max(0, profile.detail_fetch_limit)
+
+    def _collection_target(self, profile: CaptureProfile, max_results: int) -> int:
+        requested = max(1, int(max_results))
+        minimum_target = min(max(50, requested * 2), 75)
+        return max(requested + max(0, profile.target_buffer), minimum_target)
 
     def _filter_posts_by_window(self, posts: list[ScrapedPost], *, window_hours: int) -> list[ScrapedPost]:
         if window_hours <= 0:
@@ -884,15 +891,20 @@ class LinkedInScraper:
         instead of continuing through months of old content.
         """
         stable_steps = 0
-        max_steps = 30  # 30 steps × ~1s each = 30s max per state
+        max_steps = max(1, int(self.settings.scraper_max_scroll_steps))
+        stable_rounds = max(2, int(self.settings.scraper_stable_rounds))
+        min_steps_before_stop = min(max_steps, max(3, int(self.settings.scraper_scroll_steps)))
         last_count = self._result_count(page)
         last_height = self._page_height(page)
         self.logger.debug(
-            "scroll_results_start max_steps=%s initial_count=%s initial_height=%s window_hours=%s",
+            "scroll_results_start max_steps=%s stable_rounds=%s min_steps_before_stop=%s initial_count=%s initial_height=%s window_hours=%s target_results=%s",
             max_steps,
+            stable_rounds,
+            min_steps_before_stop,
             last_count,
             last_height,
             window_hours,
+            target_results,
         )
 
         for step in range(max_steps):
@@ -909,31 +921,42 @@ class LinkedInScraper:
                 stable_steps,
             )
 
-            # Smart stop: check if newest cards loaded are already old
-            # If we see posts older than window_hours appearing, stop — no more fresh posts
-            if step > 2 and self._last_cards_are_old(page, window_hours=window_hours):
-                self.logger.debug(
-                    "scroll_results_stop reason=old_posts_detected step=%s current_count=%s",
-                    step + 1,
-                    current_count,
-                )
-                break
-
+            target_reached = target_results > 0 and current_count >= target_results
             if current_count == last_count and current_height == last_height:
                 stable_steps += 1
-                if stable_steps >= 3:
-                    self.logger.debug("scroll_results_stop reason=stable current_count=%s", current_count)
-                    break
             else:
                 stable_steps = 0
                 last_count = current_count
                 last_height = current_height
+
+            if step + 1 < min_steps_before_stop:
+                continue
+
+            # Once we have enough cards loaded, old bottom cards are a good stop signal.
+            # Before that, keep scrolling so we don't miss same-day posts deeper in the feed.
+            if target_reached and self._last_cards_are_old(page, window_hours=window_hours):
+                self.logger.debug(
+                    "scroll_results_stop reason=old_posts_detected step=%s current_count=%s target_results=%s",
+                    step + 1,
+                    current_count,
+                    target_results,
+                )
+                break
+
+            if stable_steps >= stable_rounds:
+                self.logger.debug(
+                    "scroll_results_stop reason=stable current_count=%s stable_steps=%s target_results=%s target_reached=%s",
+                    current_count,
+                    stable_steps,
+                    target_results,
+                    target_reached,
+                )
+                break
         sleep(0.3)
         self.logger.debug("scroll_results_complete final_count=%s final_height=%s", self._result_count(page), self._page_height(page))
 
     def _result_count(self, page: Any) -> int:
-        locator = self._result_locator(page)
-        return locator.count() if locator is not None else 0
+        return len(self._result_cards(page))
 
     def _page_height(self, page: Any) -> int:
         try:

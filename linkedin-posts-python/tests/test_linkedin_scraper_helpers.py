@@ -167,7 +167,7 @@ class LinkedInScraperHelperTests(unittest.TestCase):
             "visible_time_samples": ["1h"],
         }
         self.scraper._result_count = lambda page: 1
-        self.scraper._scroll_results = lambda page, *, window_hours: None
+        self.scraper._scroll_results = lambda page, *, window_hours, target_results: None
         self.scraper._expand_see_more_js = lambda page: 1
         self.scraper._expand_result_cards = lambda page, *, max_cards: 2
         self.scraper._extract_posts = lambda page: [post]
@@ -188,6 +188,71 @@ class LinkedInScraperHelperTests(unittest.TestCase):
         self.assertEqual(result.audit["detail_fetches"], 0)
         self.assertEqual(result.audit["attempts_completed"], 1)
         self.assertEqual(result.audit["inline_more_clicks_total"], 3)
+
+    def test_search_session_collects_beyond_requested_result_count(self) -> None:
+        class FakeContext:
+            def __init__(self) -> None:
+                self.new_page_calls = 0
+
+            def new_page(self) -> None:
+                self.new_page_calls += 1
+                raise AssertionError("balanced mode should not open a detail page")
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.url = "https://www.linkedin.com/search/results/content/?keywords=python"
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        fake_context = FakeContext()
+        fake_page = FakePage()
+        observed_target: dict[str, int] = {}
+        posts = [
+            ScrapedPost(
+                external_id=f"post-{index}",
+                permalink=f"https://www.linkedin.com/feed/update/urn:li:activity:{index}/",
+                author_name="Recruiter",
+                author_profile_url=None,
+                content_text=f"Need Python developer in TX #{index}",
+                relative_time_text="1h",
+            )
+            for index in range(55)
+        ]
+
+        self.scraper._open_search = lambda page, query, *, window_hours: True
+        self.scraper._assert_logged_in = lambda context, page: None
+        self.scraper._ensure_manual_search_filters = lambda page, *, query, window_hours: {
+            "content_page_opened": True,
+            "latest_filter_clicked": True,
+            "latest_filter_active": True,
+            "date_filter_clicked": True,
+            "date_filter_active": True,
+            "visible_time_samples": ["1h"],
+        }
+        self.scraper._result_count = lambda page: len(posts)
+
+        def fake_scroll(page, *, window_hours, target_results):
+            observed_target["value"] = target_results
+
+        self.scraper._scroll_results = fake_scroll
+        self.scraper._expand_see_more_js = lambda page: 0
+        self.scraper._expand_result_cards = lambda page, *, max_cards: 0
+        self.scraper._extract_posts = lambda page: posts
+        self.scraper._filter_posts_by_window = lambda values, *, window_hours: values
+
+        result = self.scraper.search_posts_in_session(
+            fake_context,
+            fake_page,
+            'python developer, "TX"',
+            max_results=20,
+            capture_mode="balanced",
+        )
+
+        self.assertGreater(observed_target["value"], 20)
+        self.assertEqual(len(result.posts), 55)
+        self.assertEqual(result.audit["returned_posts"], 55)
+        self.assertEqual(result.audit["collection_target"], observed_target["value"])
 
 
 if __name__ == "__main__":

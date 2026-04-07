@@ -8,7 +8,7 @@ from typing import Any, Iterator
 
 from .config import Settings, get_settings
 from .post_age import linkedin_post_is_within_hours, linkedin_posted_at
-from .scoring import keyword_match_score
+from .scoring import extract_state_match_scores, keyword_match_score
 
 
 SCHEMA = """
@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS search_results (
     post_id INTEGER NOT NULL,
     matched_state_code TEXT NOT NULL,
     score REAL NOT NULL DEFAULT 0,
+    matched_opening_text TEXT,
+    match_type TEXT,
+    role_family TEXT,
+    relevance_score REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     UNIQUE (search_id, post_id, matched_state_code),
     FOREIGN KEY (search_id) REFERENCES searches(id) ON DELETE CASCADE,
@@ -75,6 +79,16 @@ CREATE INDEX IF NOT EXISTS idx_search_runs_search_id ON search_runs(search_id);
 CREATE INDEX IF NOT EXISTS idx_search_results_search_id ON search_results(search_id);
 CREATE INDEX IF NOT EXISTS idx_search_results_post_id ON search_results(post_id);
 CREATE INDEX IF NOT EXISTS idx_posts_last_seen_at ON posts(last_seen_at);
+
+CREATE TABLE IF NOT EXISTS post_state_matches (
+    post_id INTEGER NOT NULL,
+    state_code TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (post_id, state_code),
+    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_state_matches_state_code ON post_state_matches(state_code);
 
 CREATE TABLE IF NOT EXISTS resumes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,7 +129,10 @@ def init_db(settings: Settings | None = None) -> None:
         _ensure_search_capture_mode(connection)
         _remove_search_run_audit(connection)
         _ensure_post_view_tracking(connection)
+        _ensure_search_result_match_metadata(connection)
         _ensure_resumes_table(connection)
+        _ensure_post_state_matches_table(connection)
+        _sync_post_state_matches(connection)
 
 
 def _ensure_search_capture_mode(connection: sqlite3.Connection) -> None:
@@ -146,6 +163,21 @@ def _ensure_post_view_tracking(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_posts_viewed_at ON posts(viewed_at)")
 
 
+def _ensure_search_result_match_metadata(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(search_results)").fetchall()
+    }
+    if "matched_opening_text" not in columns:
+        connection.execute("ALTER TABLE search_results ADD COLUMN matched_opening_text TEXT")
+    if "match_type" not in columns:
+        connection.execute("ALTER TABLE search_results ADD COLUMN match_type TEXT")
+    if "role_family" not in columns:
+        connection.execute("ALTER TABLE search_results ADD COLUMN role_family TEXT")
+    if "relevance_score" not in columns:
+        connection.execute("ALTER TABLE search_results ADD COLUMN relevance_score REAL NOT NULL DEFAULT 0")
+
+
 def _ensure_resumes_table(connection: sqlite3.Connection) -> None:
     tables = {
         row["name"]
@@ -166,6 +198,55 @@ def _ensure_resumes_table(connection: sqlite3.Connection) -> None:
                 is_active INTEGER NOT NULL DEFAULT 1
             )
             """
+        )
+
+
+def _ensure_post_state_matches_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS post_state_matches (
+            post_id INTEGER NOT NULL,
+            state_code TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (post_id, state_code),
+            FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_post_state_matches_state_code ON post_state_matches(state_code)"
+    )
+
+
+def _sync_post_state_matches(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT id, content_text, best_state_code, state_confidence
+        FROM posts
+        """
+    ).fetchall()
+    if not rows:
+        return
+
+    connection.execute("DELETE FROM post_state_matches")
+    inserts: list[tuple[int, str, float]] = []
+    for row in rows:
+        post_id = int(row["id"])
+        matches = extract_state_match_scores(row["content_text"] or "")
+        if not matches and row["best_state_code"]:
+            matches = {
+                str(row["best_state_code"]).upper(): max(0.01, float(row["state_confidence"] or 0.0))
+            }
+        for state_code, confidence in matches.items():
+            inserts.append((post_id, state_code, float(confidence)))
+
+    if inserts:
+        connection.executemany(
+            """
+            INSERT OR REPLACE INTO post_state_matches (post_id, state_code, confidence)
+            VALUES (?, ?, ?)
+            """,
+            inserts,
         )
 
 
@@ -457,18 +538,74 @@ def link_search_result(
     post_id: int,
     matched_state_code: str,
     score: float,
+    *,
+    matched_opening_text: str | None = None,
+    match_type: str | None = None,
+    role_family: str | None = None,
+    relevance_score: float = 0.0,
     settings: Settings | None = None,
 ) -> bool:
     with get_connection(settings) as connection:
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO search_results (
-                search_id, run_id, post_id, matched_state_code, score, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                search_id, run_id, post_id, matched_state_code, score,
+                matched_opening_text, match_type, role_family, relevance_score, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (search_id, run_id, post_id, matched_state_code, score, utcnow_iso()),
+            (
+                search_id,
+                run_id,
+                post_id,
+                matched_state_code,
+                score,
+                matched_opening_text,
+                match_type,
+                role_family,
+                relevance_score,
+                utcnow_iso(),
+            ),
         )
     return cursor.rowcount > 0
+
+
+def replace_post_state_matches(
+    post_id: int,
+    state_matches: dict[str, float],
+    settings: Settings | None = None,
+) -> None:
+    normalized_matches = {
+        str(state_code).upper(): float(confidence)
+        for state_code, confidence in state_matches.items()
+        if str(state_code).strip() and float(confidence) > 0
+    }
+    with get_connection(settings) as connection:
+        connection.execute("DELETE FROM post_state_matches WHERE post_id = ?", (post_id,))
+        if normalized_matches:
+            connection.executemany(
+                """
+                INSERT INTO post_state_matches (post_id, state_code, confidence)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (post_id, state_code, confidence)
+                    for state_code, confidence in sorted(normalized_matches.items())
+                ],
+            )
+
+
+def list_post_state_matches(post_id: int, settings: Settings | None = None) -> list[dict[str, Any]]:
+    with get_connection(settings) as connection:
+        rows = connection.execute(
+            """
+            SELECT post_id, state_code, confidence
+            FROM post_state_matches
+            WHERE post_id = ?
+            ORDER BY confidence DESC, state_code ASC
+            """,
+            (post_id,),
+        ).fetchall()
+    return [row_to_dict(row) for row in rows]
 
 
 def list_results_for_search(search_id: int, settings: Settings | None = None) -> list[dict[str, Any]]:
@@ -484,6 +621,10 @@ def list_results_for_search(search_id: int, settings: Settings | None = None) ->
                 sr.run_id,
                 sr.matched_state_code,
                 sr.score,
+                sr.matched_opening_text,
+                sr.match_type,
+                sr.role_family,
+                sr.relevance_score,
                 p.*
             FROM search_results sr
             JOIN posts p ON p.id = sr.post_id
@@ -518,37 +659,62 @@ def list_related_posts_for_search(
     settings: Settings | None = None,
 ) -> list[dict[str, Any]]:
     clauses = [
-        "p.best_state_code IS NOT NULL",
         "p.id NOT IN (SELECT post_id FROM search_results WHERE search_id = ?)",
     ]
     params: list[Any] = [search_id]
-
-    normalized_state_codes = [str(code).upper() for code in (state_codes or []) if str(code).strip()]
-    if normalized_state_codes:
-        placeholders = ", ".join("?" for _ in normalized_state_codes)
-        clauses.append(f"p.best_state_code IN ({placeholders})")
-        params.extend(normalized_state_codes)
 
     where_sql = " AND ".join(clauses)
     with get_connection(settings) as connection:
         rows = connection.execute(
             f"""
-            SELECT p.*
+            SELECT
+                p.*,
+                psm.state_code AS related_state_code,
+                psm.confidence AS related_state_confidence
             FROM posts p
+            LEFT JOIN post_state_matches psm ON psm.post_id = p.id
             WHERE {where_sql}
             """,
             params,
         ).fetchall()
 
-    related_posts: list[dict[str, Any]] = []
+    normalized_state_codes = [str(code).upper() for code in (state_codes or []) if str(code).strip()]
+    grouped_rows: dict[int, dict[str, Any]] = {}
     for row in rows:
-        data = row_to_dict(row)
+        post_id = int(row["id"] or 0)
+        if not post_id:
+            continue
+        group = grouped_rows.get(post_id)
+        if group is None:
+            group = {
+                "post": row_to_dict(row),
+                "state_matches": [],
+            }
+            grouped_rows[post_id] = group
+        if row["related_state_code"]:
+            group["state_matches"].append(
+                (
+                    str(row["related_state_code"]).upper(),
+                    float(row["related_state_confidence"] or 0.0),
+                )
+            )
+
+    related_posts: list[dict[str, Any]] = []
+    for group in grouped_rows.values():
+        data = group.get("post")
         if not data:
+            continue
+        selected_state_code = _select_related_state_code(
+            state_matches=group["state_matches"],
+            allowed_state_codes=normalized_state_codes,
+            fallback_state_code=data.get("best_state_code"),
+        )
+        if not selected_state_code:
             continue
         score = keyword_match_score(data.get("content_text", ""), keywords)
         if score <= 0:
             continue
-        data["matched_state_code"] = data.get("best_state_code")
+        data["matched_state_code"] = selected_state_code
         data["score"] = score
         data["match_type"] = "related"
         related_posts.append(data)
@@ -570,16 +736,35 @@ def list_recent_posts(limit: int = 25, settings: Settings | None = None) -> list
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
-            SELECT p.*
+            SELECT
+                p.*,
+                sr.matched_state_code,
+                sr.score,
+                sr.matched_opening_text,
+                sr.match_type,
+                sr.role_family,
+                sr.relevance_score
             FROM posts p
-            WHERE EXISTS (
-                SELECT 1
-                FROM search_results sr
-                WHERE sr.post_id = p.id
-            )
+            JOIN search_results sr ON sr.post_id = p.id
             """,
         ).fetchall()
-    posts = [row_to_dict(row) for row in rows]
+    posts_by_id: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        data = row_to_dict(row)
+        if not data:
+            continue
+        post_id = int(data.get("id") or 0)
+        if not post_id:
+            continue
+        existing = posts_by_id.get(post_id)
+        if existing is None:
+            posts_by_id[post_id] = data
+            continue
+        current_relevance = float(data.get("relevance_score") or data.get("score") or 0.0)
+        existing_relevance = float(existing.get("relevance_score") or existing.get("score") or 0.0)
+        if current_relevance > existing_relevance:
+            posts_by_id[post_id] = data
+    posts = list(posts_by_id.values())
     posts.sort(
         key=lambda row: (
             _linkedin_post_sort_timestamp(row),
@@ -665,6 +850,31 @@ def _linkedin_post_sort_timestamp(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _select_related_state_code(
+    *,
+    state_matches: list[tuple[str, float]],
+    allowed_state_codes: list[str],
+    fallback_state_code: str | None,
+) -> str | None:
+    allowed = set(allowed_state_codes)
+    if allowed:
+        filtered = [item for item in state_matches if item[0] in allowed]
+        if filtered:
+            filtered.sort(key=lambda item: (-item[1], item[0]))
+            return filtered[0][0]
+        fallback = str(fallback_state_code or "").upper()
+        if fallback in allowed:
+            return fallback
+        return None
+
+    if state_matches:
+        ordered = sorted(state_matches, key=lambda item: (-item[1], item[0]))
+        return ordered[0][0]
+
+    fallback = str(fallback_state_code or "").upper()
+    return fallback or None
+
+
 def list_post_matches(post_id: int, settings: Settings | None = None) -> list[dict[str, Any]]:
     with get_connection(settings) as connection:
         rows = connection.execute(
@@ -673,6 +883,10 @@ def list_post_matches(post_id: int, settings: Settings | None = None) -> list[di
                 sr.search_id,
                 sr.matched_state_code,
                 sr.score,
+                sr.matched_opening_text,
+                sr.match_type,
+                sr.role_family,
+                sr.relevance_score,
                 s.keywords
             FROM search_results sr
             JOIN searches s ON s.id = sr.search_id
@@ -747,19 +961,38 @@ def list_resume_matched_posts(
     with get_connection(settings) as connection:
         rows = connection.execute(
             """
-            SELECT p.*
+            SELECT
+                p.*,
+                sr.matched_state_code,
+                sr.score,
+                sr.matched_opening_text,
+                sr.match_type,
+                sr.role_family,
+                sr.relevance_score
             FROM posts p
-            WHERE EXISTS (
-                SELECT 1 FROM search_results sr WHERE sr.post_id = p.id
-            )
+            JOIN search_results sr ON sr.post_id = p.id
             """
         ).fetchall()
 
-    matched: list[dict[str, Any]] = []
+    best_rows: dict[int, dict[str, Any]] = {}
     for row in rows:
         data = row_to_dict(row)
         if not data:
             continue
+        post_id = int(data.get("id") or 0)
+        if not post_id:
+            continue
+        existing = best_rows.get(post_id)
+        if existing is None:
+            best_rows[post_id] = data
+            continue
+        current_relevance = float(data.get("relevance_score") or data.get("score") or 0.0)
+        existing_relevance = float(existing.get("relevance_score") or existing.get("score") or 0.0)
+        if current_relevance > existing_relevance:
+            best_rows[post_id] = data
+
+    matched: list[dict[str, Any]] = []
+    for data in best_rows.values():
         score = resume_match_score(data.get("content_text", ""), resume_keywords)
         if score >= match_threshold:
             data["resume_match_score"] = round(score, 4)

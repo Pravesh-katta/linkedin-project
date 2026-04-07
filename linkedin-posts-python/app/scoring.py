@@ -3,11 +3,26 @@ from __future__ import annotations
 import hashlib
 import re
 
-from .state_catalog import State
+from .state_catalog import ALL_STATES, State
 
 
 WHITESPACE_RE = re.compile(r"\s+")
 WORD_RE = re.compile(r"[a-zA-Z0-9]+")
+LOCATION_CODE_CONTEXT_WORDS = (
+    "ONSITE",
+    "REMOTE",
+    "HYBRID",
+    "ONLY",
+    "LOCAL",
+    "LOCALS",
+    "USA",
+    "US",
+    "C2C",
+    "W2",
+    "FULL",
+    "CONTRACT",
+)
+AMBIGUOUS_STATE_CODES = {"IN", "OR", "ME", "HI", "OK", "ID"}
 ROLE_STOPWORDS = {
     "developer",
     "developers",
@@ -134,9 +149,54 @@ def state_match_score(content_text: str, state: State) -> float:
     uppered = normalized.upper()
     if state.name.lower() in lowered:
         return 1.0
-    if re.search(rf"\b{re.escape(state.code)}\b", uppered):
+    if _state_code_context_match(uppered, state.code):
         return 0.85
     return 0.0
+
+
+def extract_state_match_scores(
+    content_text: str,
+    states: list[State] | None = None,
+) -> dict[str, float]:
+    normalized = normalize_text(content_text)
+    if not normalized:
+        return {}
+
+    candidates = states or ALL_STATES
+    scores: dict[str, float] = {}
+    for state in candidates:
+        score = state_match_score(normalized, state)
+        if score > 0:
+            scores[state.code] = score
+    return scores
+
+
+def _state_code_context_match(uppered_text: str, state_code: str) -> bool:
+    code = state_code.upper()
+
+    if code in AMBIGUOUS_STATE_CODES:
+        ambiguous_patterns = (
+            rf"(?:(?<=,)|(?<=/))\s*{re.escape(code)}(?=$|[\s,/)\\-]|\d)",
+            rf"\b{re.escape(code)}\b(?=\s*/)",
+        )
+        return any(re.search(pattern, uppered_text) for pattern in ambiguous_patterns)
+
+    punctuated_patterns = (
+        rf"(?:(?<=,)|(?<=/)|(?<=\()|(?<=-)|(?<=:))\s*{re.escape(code)}(?=$|[\s,/)\\-]|\d)",
+    )
+    if any(re.search(pattern, uppered_text) for pattern in punctuated_patterns):
+        return True
+
+    label_pattern = rf"\b(?:LOCATION|LOCATIONS|LOC)\b[^.\n]{{0,120}}\b{re.escape(code)}\b"
+    if re.search(label_pattern, uppered_text):
+        return True
+
+    trailing_context = "|".join(LOCATION_CODE_CONTEXT_WORDS)
+    relaxed_pattern = (
+        rf"\b{re.escape(code)}\b"
+        rf"(?=\s*(?:$|,|/|\)|-|\d|\b(?:{trailing_context})\b))"
+    )
+    return bool(re.search(relaxed_pattern, uppered_text))
 
 
 def overall_result_score(content_text: str, keywords: str, state: State) -> float:

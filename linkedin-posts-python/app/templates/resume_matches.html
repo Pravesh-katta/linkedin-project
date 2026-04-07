@@ -38,9 +38,12 @@
           <a class="post-card post-card-resume{% if post.viewed_at %} post-card-viewed{% endif %}" href="{{ request.url_for('post_detail', post_id=post.id) }}">
             <div class="post-card-head">
               <div>
-                <strong>{{ post.display_title or post.author_name or 'Unknown author' }}</strong>
+                <strong>{{ post.display_matched_opening or post.display_title or post.author_name or 'Unknown author' }}</strong>
                 {% if post.display_has_group_title %}
                   <p class="meta">{{ post.display_author_name }}</p>
+                {% endif %}
+                {% if post.display_match_type and post.display_match_type != 'hidden' %}
+                  <p class="meta">{{ post.display_match_type|replace('_', ' ')|title }}</p>
                 {% endif %}
               </div>
               <div class="post-card-flags">

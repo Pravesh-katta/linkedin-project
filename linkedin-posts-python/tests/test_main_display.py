@@ -4,7 +4,9 @@ import unittest
 
 from app.main import (
     _annotate_post_for_display,
+    _classify_frontend_post_intent,
     _extract_group_post_title,
+    _filter_posts_for_frontend,
     _format_post_display_text,
     _strip_post_display_scaffolding,
 )
@@ -75,6 +77,57 @@ class PostDisplayTests(unittest.TestCase):
             "Key Responsibilities: Develop and maintain applications using Python\n• Work with AWS services\n\n"
             "Required Skills: Strong experience in Python development",
         )
+
+    def test_classify_frontend_post_intent_hides_consultant_supply_posts(self) -> None:
+        classification = _classify_frontend_post_intent(
+            (
+                "Dear Hiring Managers, Greetings! I have highly skilled consultants available for immediate deployment "
+                "and ready to relocate across the US. Available Skill Sets & Hot Profiles: "
+                "Python Developer - H1B - TX (F2F Ready). "
+                "Please feel free to share your current requirements or add me to your vendor distribution list."
+            )
+        )
+        self.assertEqual(classification["display_post_intent"], "consultant_supply")
+        self.assertTrue(classification["display_hidden_from_frontend"])
+        self.assertGreater(
+            classification["display_supply_intent_score"],
+            classification["display_job_intent_score"],
+        )
+
+    def test_classify_frontend_post_intent_keeps_hotlist_positions_posts(self) -> None:
+        classification = _classify_frontend_post_intent(
+            (
+                "Hotlist positions available. We are hiring for below roles. "
+                "Role: Python Developer Location: Pennington, NJ Must Have Skills: Python, Flask, GraphQL. "
+                "Send resume to recruiter@example.com."
+            )
+        )
+        self.assertEqual(classification["display_post_intent"], "job_post")
+        self.assertFalse(classification["display_hidden_from_frontend"])
+
+    def test_filter_posts_for_frontend_removes_supply_posts_only(self) -> None:
+        posts = [
+            {
+                "author_name": "Bhavani Prasad",
+                "content_text": (
+                    "Dear Hiring Managers, I have consultants available for immediate deployment. "
+                    "Hot Profiles: Python Developer - H1B. Share your requirements."
+                ),
+            },
+            {
+                "author_name": "Harshit Gupta",
+                "content_text": (
+                    "We are hiring. Role: Full Stack Python Developer Location: Pennington, NJ "
+                    "Must Have Skills: Python, Flask, FastAPI, GraphQL. Send resume."
+                ),
+            },
+        ]
+
+        visible_posts = _filter_posts_for_frontend(posts)
+
+        self.assertEqual(len(visible_posts), 1)
+        self.assertEqual(visible_posts[0]["author_name"], "Harshit Gupta")
+        self.assertFalse(visible_posts[0]["display_hidden_from_frontend"])
 
 
 if __name__ == "__main__":

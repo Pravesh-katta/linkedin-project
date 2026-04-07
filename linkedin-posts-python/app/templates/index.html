@@ -65,10 +65,10 @@
     </div>
   </section>
 
-  {# ── Search form + saved searches ───────────────────────────────── #}
-  <section class="grid">
-    <div class="card">
-      <h2>Create a saved search</h2>
+  {# ── Search form ────────────────────────────────────────────────── #}
+  <section class="card">
+    <div>
+      <h2>Create a search</h2>
       <form method="post" action="{{ request.url_for('create_search') }}" class="form-grid">
         <label>
           <span>Keywords</span>
@@ -113,103 +113,8 @@
         <p class="helper-text">
           Balanced mode runs multiple scroll passes. Deep mode opens individual post pages for full content — slower but captures truncated posts.
         </p>
-        <button class="button button-primary" type="submit">Create search</button>
+        <button class="button button-primary" type="submit">Start search</button>
       </form>
     </div>
-
-    <div class="card">
-      <h2>Saved searches</h2>
-      {% if searches %}
-        <div class="stack">
-          {% for search in searches %}
-            <div class="list-card">
-              <div>
-                <h3>{{ search.keywords }}</h3>
-                <p class="meta">
-                  {{ search.state_scope_label }} ·
-                  {{ search.capture_mode_label }} capture ·
-                  {{ search.total_posts }} saved posts
-                  {% if search.last_run_at %} · last run {{ search.last_run_at }}{% endif %}
-                </p>
-                {% if search.latest_attempt %}
-                  <p class="meta">
-                    {{ search.attempt_count }} attempts ·
-                    {{ search.latest_attempt.status }} ·
-                    found {{ search.latest_attempt.found_count }}
-                  </p>
-                {% else %}
-                  <p class="meta">No search attempts yet.</p>
-                {% endif %}
-              </div>
-              <div class="actions">
-                <a class="button button-secondary" href="{{ request.url_for('search_detail', search_id=search.id) }}">Open</a>
-                <form method="post" action="{{ request.url_for('run_search', search_id=search.id) }}">
-                  <button class="button button-primary" type="submit">Run now</button>
-                </form>
-              </div>
-            </div>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="empty">No saved searches yet.</p>
-      {% endif %}
-    </div>
-  </section>
-
-  {# ── Recent posts ────────────────────────────────────────────────── #}
-  <section class="card">
-      <div class="lane-head" style="margin-bottom:16px;">
-        <h2>Recently captured posts</h2>
-        {% if active_resume %}
-        <span class="resume-filter-badge">🎯 Resume scored · highlight at ≥{{ (active_resume.match_threshold * 100)|int }}%</span>
-        {% endif %}
-      </div>
-    {% if recent_posts %}
-      <div class="posts-grid">
-        {% for post in recent_posts %}
-            <a class="post-card{% if post.viewed_at %} post-card-viewed{% endif %}{% if post.resume_match_pct %} post-card-resume{% endif %}"
-               href="{{ request.url_for('post_detail', post_id=post.id) }}">
-              <div class="post-card-head">
-                <div>
-                  <p class="post-title">{{ post.display_title or post.author_name or 'Unknown author' }}</p>
-                  {% if post.display_has_group_title %}
-                    <p class="meta">{{ post.display_author_name }}</p>
-                  {% endif %}
-                </div>
-                <div class="post-card-flags">
-                  {% if post.resume_match_pct %}
-                    <span class="resume-badge">🎯 {{ post.resume_match_pct }}%</span>
-                  {% endif %}
-                  {% if post.viewed_at %}
-                    <span class="post-status post-status-viewed">Seen</span>
-                  {% endif %}
-                </div>
-              </div>
-              {% if post.display_role or post.display_location or post.display_duration %}
-                <div class="post-card-brief">
-                  {% if post.display_role %}
-                    <p><strong>Role</strong><span>{{ post.display_role }}</span></p>
-                  {% endif %}
-                  {% if post.display_location %}
-                    <p><strong>Location</strong><span>{{ post.display_location }}</span></p>
-                  {% endif %}
-                  {% if post.display_duration %}
-                    <p><strong>Duration</strong><span>{{ post.display_duration }}</span></p>
-                  {% endif %}
-                </div>
-              {% endif %}
-              <p class="post-snippet">{{ post.display_excerpt[:220] }}{% if post.display_excerpt|length > 220 %}…{% endif %}</p>
-              <p class="meta">{{ post.best_state_code or 'Unscored' }} · {{ post.relative_time_text or 'Time unavailable' }}</p>
-            </a>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="empty-state">
-        <p>No posts have been collected yet.</p>
-        {% if not active_resume %}
-          <p class="meta">Upload your resume above, then run a search to start collecting LinkedIn posts.</p>
-        {% endif %}
-      </div>
-    {% endif %}
   </section>
 {% endblock %}

@@ -3,9 +3,12 @@
 {% block content %}
   <section class="card">
     <p class="eyebrow">Post detail</p>
-    <h1>{{ post.display_title or post.author_name or 'Unknown author' }}</h1>
+    <h1>{{ post.display_matched_opening or post.display_title or post.author_name or 'Unknown author' }}</h1>
     {% if post.display_has_group_title %}
       <p class="meta" style="margin-top: 6px;">Posted by {{ post.display_author_name }}</p>
+    {% endif %}
+    {% if post.display_match_type and post.display_match_type != 'hidden' %}
+      <p class="meta" style="margin-top: 6px;">Match type: {{ post.display_match_type|replace('_', ' ')|title }}</p>
     {% endif %}
 
     {% if post.resume_match_pct %}
@@ -67,6 +70,9 @@
               <div>
                 <strong>{{ match.keywords }}</strong>
                 <p class="meta">{{ match.matched_state_code }} · score {{ '%.2f'|format(match.score) }}</p>
+                {% if match.matched_opening_text %}
+                  <p class="meta">Matched opening: {{ match.matched_opening_text }}</p>
+                {% endif %}
               </div>
               <a class="button button-secondary" href="{{ request.url_for('search_detail', search_id=match.search_id) }}">Open search</a>
             </div>
