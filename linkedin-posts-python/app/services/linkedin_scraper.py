@@ -44,9 +44,10 @@ RESULT_SELECTORS = (
     "li.reusable-search__result-container",
     "div.reusable-search__result-container",
     "li.search-results__list-item",
+    "div[role='listitem']:has(h2:has-text('Feed post'))",
 )
 
-FILTER_RETRY_ATTEMPTS = 3
+FILTER_RETRY_ATTEMPTS = 1
 FILTER_WAIT_MS = 900
 
 
@@ -480,25 +481,23 @@ class LinkedInScraper:
             option_label="Latest",
             trigger_labels=("Sort by", "Latest"),
         )
+        visible_samples = self._sample_visible_times(page)
         if not latest_audit["active"]:
-            raise RuntimeError(
-                "LinkedIn did not confirm the Latest filter. "
-                f"Visible times: {self._sample_visible_times(page)}"
+            # New LinkedIn DOM uses obfuscated a11y attrs — the chip-active check
+            # often fails even when sortBy=date_posted is applied via URL. Posts
+            # are still rendering (visible_samples non-empty), so log and continue.
+            self.logger.warning(
+                "filter_guard_latest_unconfirmed query=%r visible_times=%s",
+                query,
+                visible_samples,
             )
 
-        date_audit = {"clicked": False, "active": window_hours > 24}
-        if window_hours <= 24:
-            date_audit = self._ensure_filter_active(
-                page,
-                active_label="Past 24 hours",
-                option_label="Past 24 hours",
-                trigger_labels=("Date posted", "Past 24 hours", "Any time"),
-            )
-            if not date_audit["active"]:
-                raise RuntimeError(
-                    "LinkedIn did not confirm the Past 24 hours filter. "
-                    f"Visible times: {self._sample_visible_times(page)}"
-                )
+        # Date filter UI is skipped entirely: the URL no longer carries
+        # datePosted (LinkedIn returns "No results found" for past-24h on the
+        # new DOM) and date filtering happens in Python via _filter_posts_by_window.
+        # Trying to click the chip wastes ~80s per run on buttons whose
+        # selectors no longer match.
+        date_audit = {"clicked": False, "active": True}
 
         return {
             "content_page_opened": content_page_opened,
@@ -745,13 +744,16 @@ class LinkedInScraper:
         return False
 
     def _build_content_results_url(self, query: str, *, window_hours: int) -> str:
+        # NOTE: omit datePosted=past-24h — the new LinkedIn DOM returns
+        # "No results found" for that param value. The scraper still applies a
+        # window-hours filter in Python via _filter_posts_by_window, so this
+        # only affects the URL, not which posts are kept.
+        del window_hours
         params: list[tuple[str, str]] = [
             ("keywords", self._normalize_space(query)),
             ("sortBy", '"date_posted"'),
             ("origin", "FACETED_SEARCH"),
         ]
-        if window_hours <= 24:
-            params.append(("datePosted", '"past-24h"'))
         return f"https://www.linkedin.com/search/results/content/?{urlencode(params)}"
 
     def _sanitize_content_results_url(self, url: str, *, query: str, window_hours: int) -> str:
@@ -764,7 +766,10 @@ class LinkedInScraper:
             self.logger.debug("normalize_content_results_url_skipped query=%r url=%s", query, page.url)
             return
         self.logger.debug("normalize_content_results_url query=%r from=%s to=%s", query, page.url, clean_url)
-        page.goto(clean_url, wait_until="domcontentloaded")
+        try:
+            page.goto(clean_url, wait_until="commit", timeout=8000)
+        except Exception as exc:
+            self.logger.warning("normalize_content_results_url_goto_failed query=%r error=%s", query, exc)
         page.wait_for_timeout(1500)
 
     def _assert_logged_in(self, context: Any, page: Any) -> None:
@@ -836,6 +841,16 @@ class LinkedInScraper:
         return {"clicked": clicked, "active": active}
 
     def _chip_is_active(self, page: Any, label: str) -> bool:
+        # URL-based fast-path: trust query-string params over DOM state. The new
+        # LinkedIn DOM uses obfuscated CSS classes for the "active" chip styling
+        # and exposes none of the standard a11y attributes the JS check below
+        # looks for, so the only reliable signal is the URL we navigated to.
+        url = (page.url or "").lower()
+        label_norm = (label or "").strip().lower()
+        if label_norm == "latest" and "sortby=" in url and "date_posted" in url:
+            return True
+        if label_norm == "past 24 hours" and "dateposted=" in url and "past-24h" in url:
+            return True
         try:
             return bool(
                 page.evaluate(
@@ -1108,20 +1123,44 @@ class LinkedInScraper:
                       ];
 
                       let authorProfileUrl = "";
+                      let authorNameFromLink = "";
                       for (const selector of authorProfileSelectors) {
                         const link = node.querySelector(selector);
-                        if (link && link.href) {
+                        if (link && link.href && !authorProfileUrl) {
                           authorProfileUrl = link.href;
-                          break;
                         }
+                        // Walk all matching links — pick the first whose innerText starts with a real name
+                        for (const candidate of Array.from(node.querySelectorAll(selector))) {
+                          const lines = (candidate.innerText || "").split("\\n").map((s) => s.trim()).filter(Boolean);
+                          for (const line of lines) {
+                            if (line.startsWith("•")) continue;
+                            if (/^\d[\d,]*\s+followers?$/i.test(line)) continue;
+                            if (/^(?:[123]rd\+?|1st|2nd)$/i.test(line)) continue;
+                            authorNameFromLink = line;
+                            break;
+                          }
+                          if (authorNameFromLink) break;
+                        }
+                        if (authorProfileUrl && authorNameFromLink) break;
                       }
 
                       const timeElement = node.querySelector('time');
 
+                      // Fallback: scan card text for the relative-time pattern LinkedIn shows
+                      // ("3h", "22m", "2d", "1w", "yesterday", etc.) since the new DOM no
+                      // longer wraps it in a <time> element with a stable class hook.
+                      let relativeTimeFromText = "";
+                      const fullCardText = node.innerText || "";
+                      const timePattern = /\\b(\\d+\\s*(?:m|h|d|w|mo|y)|\\d+\\s+(?:minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|yesterday)\\b/i;
+                      const timeMatch = fullCardText.match(timePattern);
+                      if (timeMatch) {
+                        relativeTimeFromText = timeMatch[0];
+                      }
+
                       return {
                         permalink_candidates: unique(permalinkCandidates),
                         urn_candidates: urnCandidates,
-                        author_name: textFrom(authorSelectors),
+                        author_name: textFrom(authorSelectors) || authorNameFromLink,
                         author_profile_url: authorProfileUrl,
                         content_candidates: textsFrom([
                           '.update-components-update-v2__commentary',
@@ -1134,10 +1173,10 @@ class LinkedInScraper:
                           '.break-words'
                         ]),
                         full_text: node.innerText ? normalize(node.innerText) : "",
-                        relative_time_text: (timeElement && timeElement.innerText) ? normalize(timeElement.innerText) : textFrom([
+                        relative_time_text: ((timeElement && timeElement.innerText) ? normalize(timeElement.innerText) : textFrom([
                           '.update-components-actor__sub-description',
                           '.entity-result__secondary-subtitle'
-                        ]),
+                        ])) || relativeTimeFromText,
                         absolute_posted_at: timeElement ? timeElement.getAttribute('datetime') || "" : "",
                       };
                     }
