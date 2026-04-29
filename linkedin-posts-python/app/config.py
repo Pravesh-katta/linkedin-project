@@ -80,7 +80,7 @@ def get_settings() -> Settings:
         default_capture_mode=_capture_mode(os.getenv("DEFAULT_CAPTURE_MODE"), default="balanced"),
         default_window_hours=int(os.getenv("DEFAULT_WINDOW_HOURS", "24")),
         post_retention_hours=int(os.getenv("POST_RETENTION_HOURS", "24")),
-        default_max_results_per_state=int(os.getenv("DEFAULT_MAX_RESULTS_PER_STATE", "20")),
+        default_max_results_per_state=int(os.getenv("DEFAULT_MAX_RESULTS_PER_STATE", "40")),
         max_results_per_state_limit=int(os.getenv("MAX_RESULTS_PER_STATE_LIMIT", "100")),
         scraper_scroll_steps=int(os.getenv("SCRAPER_SCROLL_STEPS", "8")),
         scraper_max_scroll_steps=int(os.getenv("SCRAPER_MAX_SCROLL_STEPS", "40")),
