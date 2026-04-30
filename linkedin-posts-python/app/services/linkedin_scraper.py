@@ -904,13 +904,19 @@ class LinkedInScraper:
         LinkedIn sorts by Latest — once we see posts > 24h old at the bottom,
         there are no more fresh posts to find. We stop scrolling immediately
         instead of continuing through months of old content.
+
+        LinkedIn's content search uses a virtualized container, so a viewport-level
+        wheel event won't trigger lazy loading. We scroll the real container via JS,
+        press `End` as a fallback, click any "Show more results" button, and wait
+        for either new cards or new scroll height before declaring stable.
         """
         stable_steps = 0
         max_steps = max(1, int(self.settings.scraper_max_scroll_steps))
         stable_rounds = max(2, int(self.settings.scraper_stable_rounds))
         min_steps_before_stop = min(max_steps, max(3, int(self.settings.scraper_scroll_steps)))
+        pause_ms = int(self.settings.scraper_scroll_pause_seconds * 1000)
         last_count = self._result_count(page)
-        last_height = self._page_height(page)
+        last_height = self._scroll_height(page)
         self.logger.debug(
             "scroll_results_start max_steps=%s stable_rounds=%s min_steps_before_stop=%s initial_count=%s initial_height=%s window_hours=%s target_results=%s",
             max_steps,
@@ -923,10 +929,30 @@ class LinkedInScraper:
         )
 
         for step in range(max_steps):
-            page.mouse.wheel(0, 3000)
-            page.wait_for_timeout(int(self.settings.scraper_scroll_pause_seconds * 1000))
+            self._scroll_to_bottom(page)
+            try:
+                page.keyboard.press("End")
+            except Exception:
+                pass
+            self._click_show_more(page)
+
+            try:
+                page.wait_for_function(
+                    """([prevCount, prevHeight, sel]) => {
+                        const cards = document.querySelectorAll(sel);
+                        const el = document.scrollingElement || document.body;
+                        const heights = [el ? el.scrollHeight : 0];
+                        document.querySelectorAll('main, [role="main"]').forEach((node) => heights.push(node.scrollHeight || 0));
+                        return cards.length > prevCount || Math.max(...heights) > prevHeight;
+                    }""",
+                    arg=[last_count, last_height, ", ".join(RESULT_SELECTORS)],
+                    timeout=max(pause_ms * 2, 2500),
+                )
+            except Exception:
+                page.wait_for_timeout(pause_ms)
+
             current_count = self._result_count(page)
-            current_height = self._page_height(page)
+            current_height = self._scroll_height(page)
             self.logger.debug(
                 "scroll_results_step step=%s/%s current_count=%s current_height=%s stable_steps=%s",
                 step + 1,
@@ -947,14 +973,20 @@ class LinkedInScraper:
             if step + 1 < min_steps_before_stop:
                 continue
 
-            # Once we have enough cards loaded, old bottom cards are a good stop signal.
-            # Before that, keep scrolling so we don't miss same-day posts deeper in the feed.
             if target_reached and self._last_cards_are_old(page, window_hours=window_hours):
                 self.logger.debug(
                     "scroll_results_stop reason=old_posts_detected step=%s current_count=%s target_results=%s",
                     step + 1,
                     current_count,
                     target_results,
+                )
+                break
+
+            if self._last_cards_are_old(page, window_hours=window_hours) and current_count >= 8:
+                self.logger.debug(
+                    "scroll_results_stop reason=window_exhausted step=%s current_count=%s",
+                    step + 1,
+                    current_count,
                 )
                 break
 
@@ -968,16 +1000,73 @@ class LinkedInScraper:
                 )
                 break
         sleep(0.3)
-        self.logger.debug("scroll_results_complete final_count=%s final_height=%s", self._result_count(page), self._page_height(page))
+        self.logger.debug("scroll_results_complete final_count=%s final_height=%s", self._result_count(page), self._scroll_height(page))
+
+    def _scroll_to_bottom(self, page: Any) -> None:
+        """Scroll every plausible scroll container to its bottom.
+
+        LinkedIn renders the feed inside a virtualized container; the document
+        body itself often has fixed height, so `window.scrollTo` alone does
+        nothing. We walk likely scroll roots and push each to its scrollHeight.
+        """
+        try:
+            page.evaluate(
+                """
+                () => {
+                  const targets = new Set();
+                  const root = document.scrollingElement || document.documentElement || document.body;
+                  if (root) targets.add(root);
+                  document.querySelectorAll('main, [role="main"], .scaffold-finite-scroll, .scaffold-finite-scroll__content').forEach((el) => targets.add(el));
+                  document.querySelectorAll('*').forEach((el) => {
+                    if (targets.has(el)) return;
+                    const style = window.getComputedStyle(el);
+                    const overflowY = style && style.overflowY;
+                    if ((overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 80) {
+                      targets.add(el);
+                    }
+                  });
+                  for (const el of targets) {
+                    try { el.scrollTop = el.scrollHeight; } catch (_) { /* noop */ }
+                  }
+                  try { window.scrollTo(0, document.body ? document.body.scrollHeight : 0); } catch (_) { /* noop */ }
+                }
+                """
+            )
+        except Exception as exc:
+            self.logger.debug("scroll_to_bottom_failed error=%r", exc)
+
+    def _scroll_height(self, page: Any) -> int:
+        try:
+            return int(
+                page.evaluate(
+                    """
+                    () => {
+                      const heights = [];
+                      const root = document.scrollingElement || document.body;
+                      if (root) heights.push(root.scrollHeight || 0);
+                      document.querySelectorAll('main, [role="main"]').forEach((el) => heights.push(el.scrollHeight || 0));
+                      return heights.length ? Math.max(...heights) : 0;
+                    }
+                    """
+                )
+            )
+        except Exception:
+            return 0
+
+    def _click_show_more(self, page: Any) -> None:
+        try:
+            button = page.locator(
+                "button:has-text('Show more results'), button:has-text('See more results'), button:has-text('Load more')"
+            ).first
+            if button and button.count():
+                button.scroll_into_view_if_needed(timeout=400)
+                button.click(timeout=600)
+                self.logger.debug("scroll_results_show_more_clicked")
+        except Exception:
+            pass
 
     def _result_count(self, page: Any) -> int:
         return len(self._result_cards(page))
-
-    def _page_height(self, page: Any) -> int:
-        try:
-            return int(page.evaluate("() => document.scrollingElement?.scrollHeight || document.body.scrollHeight || 0"))
-        except Exception:
-            return 0
 
     def _last_cards_are_old(self, page: Any, *, window_hours: int = 24) -> bool:
         """Check if the last few visible cards have timestamps older than window_hours.
