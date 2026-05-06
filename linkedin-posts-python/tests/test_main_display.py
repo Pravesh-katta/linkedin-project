@@ -5,6 +5,7 @@ import unittest
 from app.main import (
     _annotate_post_for_display,
     _classify_frontend_post_intent,
+    _dedupe_posts_by_author_content,
     _extract_group_post_title,
     _filter_posts_for_frontend,
     _format_post_display_text,
@@ -128,6 +129,89 @@ class PostDisplayTests(unittest.TestCase):
         self.assertEqual(len(visible_posts), 1)
         self.assertEqual(visible_posts[0]["author_name"], "Harshit Gupta")
         self.assertFalse(visible_posts[0]["display_hidden_from_frontend"])
+
+
+class PostDedupTests(unittest.TestCase):
+    def _make_post(self, **overrides):
+        post = {
+            "id": 1,
+            "author_name": "Recruiter A",
+            "author_profile_url": "https://linkedin.com/in/recruiter-a",
+            "content_text": "Hiring Python Developer in TX. Send resume.",
+            "display_excerpt": "Hiring Python Developer in TX. Send resume.",
+            "score": 1.0,
+            "viewed_at": None,
+        }
+        post.update(overrides)
+        return post
+
+    def test_dedupes_same_author_same_content(self) -> None:
+        posts = [
+            self._make_post(id=1, score=0.5),
+            self._make_post(id=2, score=0.9),
+            self._make_post(id=3, score=0.7),
+        ]
+        deduped = _dedupe_posts_by_author_content(posts)
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["id"], 2)
+
+    def test_keeps_different_content_from_same_author(self) -> None:
+        posts = [
+            self._make_post(
+                id=1,
+                content_text="Hiring Python Developer in TX",
+                display_excerpt="Hiring Python Developer in TX",
+            ),
+            self._make_post(
+                id=2,
+                content_text="Hiring Java Developer in CA",
+                display_excerpt="Hiring Java Developer in CA",
+            ),
+        ]
+        deduped = _dedupe_posts_by_author_content(posts)
+        self.assertEqual(len(deduped), 2)
+
+    def test_keeps_same_content_from_different_authors(self) -> None:
+        posts = [
+            self._make_post(
+                id=1,
+                author_name="Recruiter A",
+                author_profile_url="https://linkedin.com/in/recruiter-a",
+            ),
+            self._make_post(
+                id=2,
+                author_name="Recruiter B",
+                author_profile_url="https://linkedin.com/in/recruiter-b",
+            ),
+        ]
+        deduped = _dedupe_posts_by_author_content(posts)
+        self.assertEqual(len(deduped), 2)
+
+    def test_propagates_viewed_at_across_duplicates(self) -> None:
+        posts = [
+            self._make_post(id=1, score=0.9, viewed_at=None),
+            self._make_post(id=2, score=0.5, viewed_at="2026-04-30T10:00:00+00:00"),
+        ]
+        deduped = _dedupe_posts_by_author_content(posts)
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["id"], 1)
+        self.assertEqual(deduped[0]["viewed_at"], "2026-04-30T10:00:00+00:00")
+
+    def test_ignores_whitespace_and_case_differences(self) -> None:
+        posts = [
+            self._make_post(
+                id=1,
+                content_text="Hiring Python Developer in TX. Send resume.",
+                display_excerpt="Hiring Python Developer in TX. Send resume.",
+            ),
+            self._make_post(
+                id=2,
+                content_text="hiring   python developer   in tx.   send resume.",
+                display_excerpt="hiring   python developer   in tx.   send resume.",
+            ),
+        ]
+        deduped = _dedupe_posts_by_author_content(posts)
+        self.assertEqual(len(deduped), 1)
 
 
 if __name__ == "__main__":

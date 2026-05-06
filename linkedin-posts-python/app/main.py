@@ -461,6 +461,49 @@ def _apply_role_match_display(post: dict[str, Any], *, keywords: str | None = No
     return post
 
 
+def _post_dedup_key(post: dict[str, Any]) -> str | None:
+    author_url = (post.get("author_profile_url") or "").strip().lower()
+    author_name_norm = " ".join((post.get("author_name") or "").lower().split())
+    author_id = author_url or author_name_norm
+    content_source = post.get("display_excerpt") or post.get("content_text") or ""
+    fingerprint = " ".join(content_source.lower().split())[:400]
+    if not author_id and not fingerprint:
+        return None
+    return f"{author_id}|{fingerprint}"
+
+
+def _dedupe_posts_by_author_content(
+    posts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    keyed: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    unkeyed: list[dict[str, Any]] = []
+    for post in posts:
+        key = _post_dedup_key(post)
+        if key is None:
+            unkeyed.append(post)
+            continue
+        existing = keyed.get(key)
+        if existing is None:
+            keyed[key] = post
+            continue
+        # Propagate viewed_at across the duplicate group so marking one
+        # variant as seen collapses the whole group into "Seen posts".
+        existing_viewed = existing.get("viewed_at")
+        current_viewed = post.get("viewed_at")
+        if existing_viewed and not current_viewed:
+            post["viewed_at"] = existing_viewed
+        elif current_viewed and not existing_viewed:
+            existing["viewed_at"] = current_viewed
+        existing_score = float(existing.get("score") or 0.0)
+        current_score = float(post.get("score") or 0.0)
+        if current_score > existing_score or (
+            current_score == existing_score
+            and int(post.get("id") or 0) > int(existing.get("id") or 0)
+        ):
+            keyed[key] = post
+    return list(keyed.values()) + unkeyed
+
+
 def _filter_posts_for_frontend(
     posts: list[dict[str, Any]],
     *,
@@ -474,9 +517,10 @@ def _filter_posts_for_frontend(
         if post.get("display_hidden_from_frontend"):
             continue
         visible_posts.append(post)
-        if limit is not None and len(visible_posts) >= limit:
-            break
-    return visible_posts
+    deduped = _dedupe_posts_by_author_content(visible_posts)
+    if limit is not None:
+        return deduped[:limit]
+    return deduped
 
 
 def _merge_results(
