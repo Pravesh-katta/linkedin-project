@@ -9,7 +9,7 @@ WORD_RE = re.compile(r"[a-z0-9+/#.-]+")
 STATE_SUFFIX_RE = re.compile(r',\s*"?(?:[A-Z]{2})"?\s*$')
 HASHTAG_RE = re.compile(r"#([a-z0-9_+-]+)", re.I)
 ROLE_MARKER_RE = re.compile(
-    r"\b(developer|engineer|scientist|analyst|architect|administrator|tester|qa|devops|sre|specialist|consultant|programmer)\b",
+    r"\b(developers?|engineers?|scientists?|analysts?|architects?|administrators?|testers?|qa|devops|sre|specialists?|consultants?|programmers?)\b",
     re.I,
 )
 OPENING_LABELS = (
@@ -213,6 +213,43 @@ def normalize_matching_text(value: str | None) -> str:
 def strip_query_state_suffix(query: str | None) -> str:
     normalized = normalize_matching_text(query)
     return STATE_SUFFIX_RE.sub("", normalized)
+
+
+ENGAGEMENT_NOISE_RE = re.compile(
+    r"\b\d+\s+(?:reactions?|comments?|reposts?|views?|shares?|likes?)\b(?:\s+\d+)?",
+    re.I,
+)
+FOOTER_NOISE_RE = re.compile(
+    r"\bLike\s+Comment(?:\s+Repost(?:\s+Send)?)?\b",
+    re.I,
+)
+# LinkedIn card header: "[Feed post] {Group/Page name} {Author} • 3rd+ {time} • Follow|Join|Connect "
+# The whole header is ephemeral (group prefix differs per cross-post, time changes per scrape).
+HEADER_NOISE_RE = re.compile(
+    r"^.{0,300}?\s+[•·]\s+(?:Follow|Join|Connect)\s+",
+    re.I | re.S,
+)
+TIMESTAMP_NOISE_RE = re.compile(
+    r"\b(?:\d+\s*(?:m|h|d|w|mo|y)\b|"
+    r"\d+\s+(?:minute|hour|day|week|month|year)s?\s+ago\b|"
+    r"just\s+now|yesterday)",
+    re.I,
+)
+CONNECTION_NOISE_RE = re.compile(
+    r"\b(?:1st|2nd|3rd|\d+th)\+?\b",
+    re.I,
+)
+
+
+def strip_ephemeral_engagement(text: str | None) -> str:
+    if not text:
+        return ""
+    cleaned = HEADER_NOISE_RE.sub("", text, count=1)
+    cleaned = ENGAGEMENT_NOISE_RE.sub(" ", cleaned)
+    cleaned = FOOTER_NOISE_RE.sub(" ", cleaned)
+    cleaned = TIMESTAMP_NOISE_RE.sub(" ", cleaned)
+    cleaned = CONNECTION_NOISE_RE.sub(" ", cleaned)
+    return " ".join(cleaned.split())
 
 
 def clean_post_text_for_matching(content_text: str | None) -> str:
@@ -496,6 +533,7 @@ def _extract_phrase_based_opening(cleaned: str) -> PostOpening | None:
     phrase_patterns = (
         r"\b(?:we are looking for|we're looking for|looking for)\s+(?:an?\s+|the\s+)?(?P<title>[^.!?\n]{0,120})",
         r"\b(?:we are hiring|we're hiring|hiring for)\s+(?:an?\s+|the\s+)?(?P<title>[^.!?\n]{0,120})",
+        r"\b(?:is|are)\s+seeking\s+(?:an?\s+|the\s+)?(?P<title>[^.!?\n]{0,120})",
     )
     for pattern in phrase_patterns:
         for match in re.finditer(pattern, cleaned, flags=re.I):

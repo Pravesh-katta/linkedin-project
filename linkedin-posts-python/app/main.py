@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from . import db
 from .config import Settings, get_settings
 from .post_age import linkedin_posted_at
-from .role_matching import analyze_post_for_query, strip_query_state_suffix
+from .role_matching import analyze_post_for_query, strip_ephemeral_engagement, strip_query_state_suffix
 from .scoring import keyword_focus_terms
 from .scheduler import SearchScheduler
 from .services.contact_extractor import extract_emails
@@ -466,7 +466,7 @@ def _post_dedup_key(post: dict[str, Any]) -> str | None:
     author_name_norm = " ".join((post.get("author_name") or "").lower().split())
     author_id = author_url or author_name_norm
     content_source = post.get("display_excerpt") or post.get("content_text") or ""
-    fingerprint = " ".join(content_source.lower().split())[:400]
+    fingerprint = strip_ephemeral_engagement(content_source).lower()[:400]
     if not author_id and not fingerprint:
         return None
     return f"{author_id}|{fingerprint}"

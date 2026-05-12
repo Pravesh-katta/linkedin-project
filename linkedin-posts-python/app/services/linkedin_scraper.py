@@ -11,6 +11,7 @@ from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 from ..config import Settings, get_settings
 from ..logging_utils import get_rotating_file_logger
 from ..post_age import linkedin_post_is_within_hours
+from ..role_matching import strip_ephemeral_engagement
 
 
 @dataclass(slots=True)
@@ -638,7 +639,7 @@ class LinkedInScraper:
     def _sample_visible_times(self, page: Any, *, limit: int = 6) -> list[str]:
         samples: list[str] = []
         pattern = re.compile(
-            r"\b(?:\d+\s*(?:m|h|d|w|mo|y)|\d+\s+(?:minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|yesterday)\b",
+            r"\b(?:\d+\s*(?:m|h|d|w|mo|y)|\d+\s+(?:minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|just\s+now|yesterday|now)\b",
             re.I,
         )
         for card in self._result_cards(page)[:limit]:
@@ -1240,7 +1241,7 @@ class LinkedInScraper:
                       // longer wraps it in a <time> element with a stable class hook.
                       let relativeTimeFromText = "";
                       const fullCardText = node.innerText || "";
-                      const timePattern = /\\b(\\d+\\s*(?:m|h|d|w|mo|y)|\\d+\\s+(?:minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|yesterday)\\b/i;
+                      const timePattern = /\\b(\\d+\\s*(?:m|h|d|w|mo|y)|\\d+\\s+(?:minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)|just\\s+now|yesterday|now)\\b/i;
                       const timeMatch = fullCardText.match(timePattern);
                       if (timeMatch) {
                         relativeTimeFromText = timeMatch[0];
@@ -1724,7 +1725,8 @@ class LinkedInScraper:
     def _build_external_id(self, permalink: str | None, author_name: str | None, content_text: str) -> str:
         if permalink:
             return permalink
-        raw = f"{author_name or ''}|{content_text}"
+        stable_content = strip_ephemeral_engagement(content_text)
+        raw = f"{author_name or ''}|{stable_content}"
         return sha1(raw.encode("utf-8")).hexdigest()
 
     def _clean_author_name(self, value: str | None) -> str:

@@ -74,6 +74,9 @@ def _relative_time_to_hours(relative_time_text: str | None) -> float | None:
 
     normalized = " ".join(relative_time_text.lower().split())
 
+    if normalized in {"now", "just now"}:
+        return 0.0
+
     compact_match = re.search(r"\b(\d+)\s*(m|h|d|w|mo|y)\b", normalized)
     if compact_match:
         return _unit_value_to_hours(int(compact_match.group(1)), compact_match.group(2))
